@@ -1,1 +1,0 @@
-# napstr-server
