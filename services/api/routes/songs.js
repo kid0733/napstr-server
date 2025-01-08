@@ -258,4 +258,129 @@ router.get('/:trackId', async (req, res) => {
     }
 });
 
+// GET /api/v1/songs/random - Get random songs with smart recommendations
+router.get('/random', async (req, res) => {
+    try {
+        const { 
+            limit = 1,
+            genre,
+            fromSongId,
+            excludeIds = []
+        } = req.query;
+
+        let matchStage = {};
+        let baseSong = null;
+        
+        // If fromSongId is provided, get that song's details and its rating history
+        if (fromSongId) {
+            baseSong = await req.app.locals.models.Song
+                .findOne({ track_id: fromSongId })
+                .lean();
+            
+            if (baseSong) {
+                // Get rating history to analyze user interaction pattern
+                const ratingHistory = await req.app.locals.models.RatingHistory
+                    .find({ song_id: fromSongId })
+                    .sort({ created_at: -1 })
+                    .limit(10)
+                    .lean();
+
+                // Calculate interaction scores
+                const playRatio = ratingHistory.filter(h => h.event_type === 'play').length / ratingHistory.length;
+                const skipRatio = ratingHistory.filter(h => h.event_type === 'skip').length / ratingHistory.length;
+                
+                // Match songs with similar characteristics based on user behavior
+                matchStage = {
+                    $and: [
+                        { track_id: { $ne: fromSongId } },
+                        { 
+                            $or: [
+                                // If song has high play ratio, prioritize same genre/artist
+                                ...(playRatio > 0.7 ? [
+                                    { genres: { $in: baseSong.genres || [] } },
+                                    { artists: { $in: baseSong.artists || [] } }
+                                ] : []),
+                                // If song gets skipped often, try different genres but similar audio features
+                                ...(skipRatio > 0.3 ? [
+                                    { genres: { $nin: baseSong.genres || [] } },
+                                    { 
+                                        rating: { 
+                                            $gte: baseSong.rating - 200,
+                                            $lte: baseSong.rating + 200
+                                        }
+                                    }
+                                ] : [])
+                            ]
+                        }
+                    ]
+                };
+            }
+        }
+
+        // Apply genre filter if specified
+        if (genre) {
+            matchStage.genres = { $regex: genre, $options: 'i' };
+        }
+
+        // Exclude specific songs
+        if (excludeIds.length > 0) {
+            const excludeArray = Array.isArray(excludeIds) ? excludeIds : [excludeIds];
+            matchStage.track_id = { $nin: excludeArray };
+        }
+
+        // Scoring based on rating system and confidence
+        const scoreStage = {
+            $addFields: {
+                score: {
+                    $add: [
+                        // Rating weight (25%)
+                        { 
+                            $multiply: [
+                                { $divide: ["$rating", 2000] },
+                                { $divide: ["$rating_confidence", { $add: ["$rating_confidence", 50] }] }, // Weight by confidence
+                                0.25
+                            ]
+                        },
+                        // Play/Skip ratio weight (25%)
+                        {
+                            $multiply: [
+                                {
+                                    $divide: [
+                                        "$total_plays",
+                                        { $add: ["$total_plays", "$skip_count", 1] }
+                                    ]
+                                },
+                                0.25
+                            ]
+                        },
+                        // Random factor for discovery (50%)
+                        { $multiply: [{ $rand: {} }, 0.5] }
+                    ]
+                }
+            }
+        };
+
+        const songs = await req.app.locals.models.Song.aggregate([
+            { $match: matchStage },
+            scoreStage,
+            { $sort: { score: -1 } },
+            { $limit: parseInt(limit) }
+        ]);
+
+        res.json({ 
+            songs,
+            basedOn: baseSong ? {
+                track_id: baseSong.track_id,
+                title: baseSong.title,
+                artists: baseSong.artists,
+                rating: baseSong.rating,
+                confidence: baseSong.rating_confidence
+            } : null
+        });
+    } catch (error) {
+        console.error('Random songs error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
 module.exports = router;
