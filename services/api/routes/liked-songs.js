@@ -26,13 +26,28 @@ router.get('/', auth, async (req, res) => {
         
         const songs = await req.app.locals.models.Song
             .find({ track_id: { $in: songIds } })
+            .select({
+                _id: 0,
+                track_id: 1,
+                title: 1,
+                artists: 1,
+                album: 1,
+                album_art: 1,
+                duration_ms: 1,
+                rating: 1,
+                total_plays: 1
+            })
             .lean();
 
-        // Combine song data with liked timestamp
+        // Combine song data with liked timestamp and transform duration
         const likedSongs = songs.map(song => {
             const likedInfo = user.likedSongs.find(item => item.songId === song.track_id);
             return {
                 ...song,
+                duration: {
+                    minutes: Math.floor(song.duration_ms / 60000),
+                    seconds: Math.floor((song.duration_ms % 60000) / 1000)
+                },
                 likedAt: likedInfo.addedAt
             };
         });
