@@ -32,7 +32,17 @@ router.get('/', async (req, res) => {
         }
 
         let songsQuery = req.app.locals.models.Song
-            .find(query)
+            .find(query, {
+                // Select only essential fields
+                track_id: 1,
+                title: 1,
+                artists: 1,
+                album: 1,
+                album_art: 1,
+                duration_ms: 1,
+                rating: 1,
+                total_plays: 1
+            })
             .sort({ [sortBy]: sortOrder === 'desc' ? -1 : 1 });
 
         // Apply pagination only if both page and limit are provided
@@ -87,7 +97,18 @@ router.get('/latest', async (req, res) => {
         }
 
         let songsQuery = req.app.locals.models.Song
-            .find(query)
+            .find(query, {
+                // Select only essential fields
+                track_id: 1,
+                title: 1,
+                artists: 1,
+                album: 1,
+                album_art: 1,
+                duration_ms: 1,
+                rating: 1,
+                total_plays: 1,
+                added_at: 1
+            })
             .sort({ added_at: -1 });  // Always sort by added_at descending
 
         // Apply pagination only if both page and limit are provided
