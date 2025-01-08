@@ -9,15 +9,15 @@ router.use((req, res, next) => {
     next();
 });
 
-// GET /api/v1/songs - Get all songs with pagination and sorting
+// GET /api/v1/songs - Get all songs with sorting (alphabetical by default)
 router.get('/', async (req, res) => {
     try {
         const {
-            page = 1,
-            limit = 20,
+            page,
+            limit,
             search,
-            sortBy = 'added_at',
-            sortOrder = 'desc'
+            sortBy = 'title',    // Default sort by title
+            sortOrder = 'asc'    // Default order is ascending
         } = req.query;
 
         let query = {};
@@ -31,26 +31,92 @@ router.get('/', async (req, res) => {
             };
         }
 
-        const songs = await req.app.locals.models.Song
+        let songsQuery = req.app.locals.models.Song
             .find(query)
-            .sort({ [sortBy]: sortOrder === 'desc' ? -1 : 1 })
-            .skip((parseInt(page) - 1) * parseInt(limit))
-            .limit(parseInt(limit))
-            .lean();
+            .sort({ [sortBy]: sortOrder === 'desc' ? -1 : 1 });
 
+        // Apply pagination only if both page and limit are provided
+        if (page && limit) {
+            songsQuery = songsQuery
+                .skip((parseInt(page) - 1) * parseInt(limit))
+                .limit(parseInt(limit));
+        }
+
+        const songs = await songsQuery.lean();
         const total = await req.app.locals.models.Song.countDocuments(query);
 
-        res.json({
+        const response = {
             songs,
-            pagination: {
-                total,
+            total
+        };
+
+        // Include pagination info only if pagination was applied
+        if (page && limit) {
+            response.pagination = {
                 page: parseInt(page),
                 pages: Math.ceil(total / parseInt(limit)),
                 limit: parseInt(limit)
-            }
-        });
+            };
+        }
+
+        res.json(response);
     } catch (error) {
         console.error('Search error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// GET /api/v1/songs/latest - Get latest added songs
+router.get('/latest', async (req, res) => {
+    try {
+        const {
+            page,
+            limit,
+            search
+        } = req.query;
+
+        let query = {};
+        if (search) {
+            query = {
+                $or: [
+                    { title: { $regex: search, $options: 'i' } },
+                    { artists: { $regex: search, $options: 'i' } },
+                    { album: { $regex: search, $options: 'i' } }
+                ]
+            };
+        }
+
+        let songsQuery = req.app.locals.models.Song
+            .find(query)
+            .sort({ added_at: -1 });  // Always sort by added_at descending
+
+        // Apply pagination only if both page and limit are provided
+        if (page && limit) {
+            songsQuery = songsQuery
+                .skip((parseInt(page) - 1) * parseInt(limit))
+                .limit(parseInt(limit));
+        }
+
+        const songs = await songsQuery.lean();
+        const total = await req.app.locals.models.Song.countDocuments(query);
+
+        const response = {
+            songs,
+            total
+        };
+
+        // Include pagination info only if pagination was applied
+        if (page && limit) {
+            response.pagination = {
+                page: parseInt(page),
+                pages: Math.ceil(total / parseInt(limit)),
+                limit: parseInt(limit)
+            };
+        }
+
+        res.json(response);
+    } catch (error) {
+        console.error('Latest songs error:', error);
         res.status(500).json({ error: error.message });
     }
 });
