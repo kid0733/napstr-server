@@ -166,7 +166,7 @@ router.get('/latest', async (req, res) => {
 router.get('/random', async (req, res) => {
     try {
         const { 
-            limit = 1,
+            limit = 20,
             genre,
             fromSongId,
             excludeIds = []
@@ -213,8 +213,8 @@ router.get('/random', async (req, res) => {
                             { genres: { $nin: baseSong.genres || [] } },
                             { 
                                 rating: { 
-                                    $gte: baseSong.rating - 200,
-                                    $lte: baseSong.rating + 200
+                                    $gte: baseSong.rating - 300,
+                                    $lte: baseSong.rating + 300
                                 }
                             }
                         ]
@@ -243,20 +243,20 @@ router.get('/random', async (req, res) => {
 
         console.log('Match stage:', JSON.stringify(matchStage, null, 2));
 
-        // Scoring based on rating system and confidence
+        // Scoring based on rating system and confidence with increased randomness
         const scoreStage = {
             $addFields: {
                 score: {
                     $add: [
-                        // Rating weight (25%)
+                        // Rating weight (20%)
                         { 
                             $multiply: [
                                 { $divide: [{ $ifNull: ["$rating", 1500] }, 2000] },
                                 { $divide: [{ $ifNull: ["$rating_confidence", 1] }, { $add: [{ $ifNull: ["$rating_confidence", 1] }, 50] }] },
-                                0.25
+                                0.2
                             ]
                         },
-                        // Play/Skip ratio weight (25%)
+                        // Play/Skip ratio weight (20%)
                         {
                             $multiply: [
                                 {
@@ -265,11 +265,11 @@ router.get('/random', async (req, res) => {
                                         { $add: [{ $ifNull: ["$total_plays", 0] }, { $ifNull: ["$skip_count", 0] }, 1] }
                                     ]
                                 },
-                                0.25
+                                0.2
                             ]
                         },
-                        // Random factor for discovery (50%)
-                        { $multiply: [{ $rand: {} }, 0.5] }
+                        // Random factor for discovery (60%) - Increased from 50%
+                        { $multiply: [{ $rand: {} }, 0.6] }
                     ]
                 }
             }
@@ -279,7 +279,21 @@ router.get('/random', async (req, res) => {
             { $match: matchStage },
             scoreStage,
             { $sort: { score: -1 } },
-            { $limit: parseInt(limit) }
+            { $limit: parseInt(limit) },
+            // Project only necessary fields
+            {
+                $project: {
+                    _id: 0,
+                    track_id: 1,
+                    title: 1,
+                    artists: 1,
+                    album: 1,
+                    album_art: 1,
+                    duration_ms: 1,
+                    rating: 1,
+                    total_plays: 1
+                }
+            }
         ]);
 
         if (!songs || songs.length === 0) {
@@ -287,25 +301,56 @@ router.get('/random', async (req, res) => {
             const fallbackSongs = await req.app.locals.models.Song.aggregate([
                 scoreStage,
                 { $sort: { score: -1 } },
-                { $limit: parseInt(limit) }
+                { $limit: parseInt(limit) },
+                // Project only necessary fields
+                {
+                    $project: {
+                        _id: 0,
+                        track_id: 1,
+                        title: 1,
+                        artists: 1,
+                        album: 1,
+                        album_art: 1,
+                        duration_ms: 1,
+                        rating: 1,
+                        total_plays: 1
+                    }
+                }
             ]);
             
             if (fallbackSongs && fallbackSongs.length > 0) {
+                // Transform duration for fallback songs
+                const transformedSongs = fallbackSongs.map(song => ({
+                    ...song,
+                    duration: {
+                        minutes: Math.floor(song.duration_ms / 60000),
+                        seconds: Math.floor((song.duration_ms % 60000) / 1000)
+                    }
+                }));
+
                 return res.json({ 
-                    songs: fallbackSongs,
+                    songs: transformedSongs,
                     fallback: true
                 });
             }
         }
 
+        // Transform duration for matched songs
+        const transformedSongs = songs.map(song => ({
+            ...song,
+            duration: {
+                minutes: Math.floor(song.duration_ms / 60000),
+                seconds: Math.floor((song.duration_ms % 60000) / 1000)
+            }
+        }));
+
         res.json({ 
-            songs,
+            songs: transformedSongs,
             basedOn: baseSong ? {
                 track_id: baseSong.track_id,
                 title: baseSong.title,
                 artists: baseSong.artists,
-                rating: baseSong.rating,
-                confidence: baseSong.rating_confidence
+                rating: baseSong.rating
             } : null
         });
     } catch (error) {
