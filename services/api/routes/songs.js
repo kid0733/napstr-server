@@ -32,8 +32,9 @@ router.get('/', async (req, res) => {
         }
 
         let songsQuery = req.app.locals.models.Song
-            .find(query, {
-                // Select only essential fields
+            .find(query)
+            .select({
+                _id: 0,
                 track_id: 1,
                 title: 1,
                 artists: 1,
@@ -55,8 +56,17 @@ router.get('/', async (req, res) => {
         const songs = await songsQuery.lean();
         const total = await req.app.locals.models.Song.countDocuments(query);
 
+        // Transform duration to minutes and seconds
+        const transformedSongs = songs.map(song => ({
+            ...song,
+            duration: {
+                minutes: Math.floor(song.duration_ms / 60000),
+                seconds: Math.floor((song.duration_ms % 60000) / 1000)
+            }
+        }));
+
         const response = {
-            songs,
+            songs: transformedSongs,
             total
         };
 
@@ -97,8 +107,9 @@ router.get('/latest', async (req, res) => {
         }
 
         let songsQuery = req.app.locals.models.Song
-            .find(query, {
-                // Select only essential fields
+            .find(query)
+            .select({
+                _id: 0,
                 track_id: 1,
                 title: 1,
                 artists: 1,
@@ -109,7 +120,7 @@ router.get('/latest', async (req, res) => {
                 total_plays: 1,
                 added_at: 1
             })
-            .sort({ added_at: -1 });  // Always sort by added_at descending
+            .sort({ added_at: -1 });
 
         // Apply pagination only if both page and limit are provided
         if (page && limit) {
@@ -121,8 +132,17 @@ router.get('/latest', async (req, res) => {
         const songs = await songsQuery.lean();
         const total = await req.app.locals.models.Song.countDocuments(query);
 
+        // Transform duration to minutes and seconds
+        const transformedSongs = songs.map(song => ({
+            ...song,
+            duration: {
+                minutes: Math.floor(song.duration_ms / 60000),
+                seconds: Math.floor((song.duration_ms % 60000) / 1000)
+            }
+        }));
+
         const response = {
-            songs,
+            songs: transformedSongs,
             total
         };
 
