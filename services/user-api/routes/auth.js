@@ -285,7 +285,23 @@ router.post('/verify', async (req, res) => {
         }
 
         // Verify token and get decoded data
-        const decoded = jwt.verify(token, process.env.JWT_SECRET);
+        let decoded;
+        try {
+            decoded = jwt.verify(token, process.env.JWT_SECRET);
+        } catch (error) {
+            console.error('JWT verification error:', error);
+            if (error.name === 'JsonWebTokenError') {
+                return res.status(401).json({ error: 'Invalid token' });
+            }
+            if (error.name === 'TokenExpiredError') {
+                return res.status(401).json({ error: 'Token expired' });
+            }
+            throw error;
+        }
+
+        if (!decoded._id) {
+            return res.status(401).json({ error: 'Invalid token format' });
+        }
         
         // Find user with this token
         const user = await req.app.locals.models.User.findOne({ 
@@ -309,21 +325,14 @@ router.post('/verify', async (req, res) => {
                 email: user.email,
                 profile: user.profile,
                 preferences: user.preferences
-            },
-            token
+            }
         });
     } catch (error) {
         console.error('Token verification error:', error);
-        
-        if (error.name === 'JsonWebTokenError') {
-            return res.status(401).json({ error: 'Invalid token' });
-        }
-        
-        if (error.name === 'TokenExpiredError') {
-            return res.status(401).json({ error: 'Token expired' });
-        }
-        
-        res.status(500).json({ error: error.message });
+        res.status(500).json({ 
+            error: 'Internal Server Error',
+            details: process.env.NODE_ENV === 'development' ? error.message : undefined
+        });
     }
 });
 
