@@ -108,6 +108,12 @@
     app.use('/api/v1/liked-songs', likedSongsRouter);
     app.use('/health', healthRouter);
 
+    // Import routes
+    const songRequestsRouter = require('./routes/song-requests');
+
+    // Register routes
+    app.use('/api/v1/song-requests', songRequestsRouter);
+
     // Error handling middleware
     app.use((err, req, res, next) => {
         console.error('Error:', err);
