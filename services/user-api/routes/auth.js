@@ -290,7 +290,7 @@ router.use((err, req, res, next) => {
 
 // Simple verify endpoint
 router.post('/verify', function(req, res) {
-    const token = req.headers['authorization'];
+    const token = req.headers['authorization']?.replace('Bearer ', '');
     if (!token) {
         return res.status(401).json({
             error: {
@@ -301,14 +301,35 @@ router.post('/verify', function(req, res) {
 
     try {
         const decoded = jwt.verify(token, process.env.JWT_SECRET);
-        res.json({
-            user: {
-                id: decoded._id,
-                // Only return non-sensitive info
-                username: decoded.username,
-                email: decoded.email
-            }
-        });
+        // Find user by id
+        req.app.locals.models.User.findById(decoded._id)
+            .select('-password -tokens')
+            .then(user => {
+                if (!user) {
+                    return res.status(401).json({
+                        error: {
+                            msg: 'User not found!'
+                        }
+                    });
+                }
+                res.json({
+                    user: {
+                        id: user._id,
+                        username: user.username,
+                        email: user.email,
+                        profile: user.profile,
+                        preferences: user.preferences
+                    }
+                });
+            })
+            .catch(err => {
+                console.error('Database error:', err);
+                res.status(500).json({
+                    error: {
+                        msg: 'Internal server error'
+                    }
+                });
+            });
     } catch (err) {
         return res.status(401).json({
             error: {
