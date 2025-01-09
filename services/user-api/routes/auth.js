@@ -290,8 +290,10 @@ router.use((err, req, res, next) => {
 
 // Simple verify endpoint
 router.post('/verify', function(req, res) {
+    console.log('Verify endpoint - Request headers:', req.headers);
     const token = req.headers['authorization']?.replace('Bearer ', '');
     if (!token) {
+        console.log('Verify endpoint - No token provided');
         return res.status(401).json({
             error: {
                 msg: 'No token provided!'
@@ -300,18 +302,23 @@ router.post('/verify', function(req, res) {
     }
 
     try {
+        console.log('Verify endpoint - Attempting to verify token');
         const decoded = jwt.verify(token, process.env.JWT_SECRET);
+        console.log('Verify endpoint - Token decoded:', { userId: decoded._id });
+        
         // Find user by id
         req.app.locals.models.User.findById(decoded._id)
             .select('-password -tokens')
             .then(user => {
                 if (!user) {
+                    console.log('Verify endpoint - User not found:', decoded._id);
                     return res.status(401).json({
                         error: {
                             msg: 'User not found!'
                         }
                     });
                 }
+                console.log('Verify endpoint - User found:', user._id);
                 res.json({
                     user: {
                         id: user._id,
@@ -323,17 +330,20 @@ router.post('/verify', function(req, res) {
                 });
             })
             .catch(err => {
-                console.error('Database error:', err);
+                console.error('Verify endpoint - Database error:', err);
                 res.status(500).json({
                     error: {
-                        msg: 'Internal server error'
+                        msg: 'Internal server error',
+                        details: process.env.NODE_ENV === 'development' ? err.message : undefined
                     }
                 });
             });
     } catch (err) {
+        console.error('Verify endpoint - Token verification error:', err);
         return res.status(401).json({
             error: {
-                msg: 'Failed to verify token!'
+                msg: 'Failed to verify token!',
+                details: process.env.NODE_ENV === 'development' ? err.message : undefined
             }
         });
     }
