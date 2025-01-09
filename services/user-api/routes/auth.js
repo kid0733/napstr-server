@@ -276,8 +276,20 @@ router.patch('/preferences', auth, async (req, res) => {
     }
 });
 
+// Error handler for JSON parsing
+router.use((err, req, res, next) => {
+    if (err instanceof SyntaxError && err.status === 400 && 'body' in err) {
+        // Handle JSON parsing errors
+        return res.status(400).json({ 
+            error: 'Invalid JSON payload',
+            details: process.env.NODE_ENV === 'development' ? err.message : undefined
+        });
+    }
+    next(err);
+});
+
 // Verify token
-router.post('/verify', async (req, res) => {
+router.post('/verify', express.raw({ type: '*/*' }), async (req, res) => {
     try {
         const token = req.header('Authorization')?.replace('Bearer ', '');
         if (!token) {
