@@ -8,6 +8,7 @@
     const { Song, songSchema } = require('./models/song');
     const { Album, albumSchema } = require('./models/album');
     const RatingHistory = require('./models/rating-history');
+    const { SongRequest, songRequestSchema } = require('./models/song-request');
     const songsRouter = require('./routes/songs');
     const albumsRouter = require('./routes/albums');
     const streamRouter = require('./routes/stream');
@@ -15,6 +16,7 @@
     const ratingRouter = require('./routes/rating');
     const healthRouter = require('./routes/health');
     const likedSongsRouter = require('./routes/liked-songs');
+    const songRequestsRouter = require('./routes/song-requests');
     const { setupSecurity } = require('./middleware/security');
     const userSchema = require('./models/user');
     require('dotenv').config();
@@ -79,7 +81,8 @@
             songId: { type: String, required: true },
             likedAt: { type: Date, default: Date.now }
         }, { timestamps: true })),
-        User: userDb.model('User', userSchema, 'users')
+        User: userDb.model('User', userSchema, 'users'),
+        SongRequest: musicDb.model('SongRequest', songRequestSchema)
     };
 
     // Log database connections for debugging
@@ -106,13 +109,8 @@
     app.use('/api/v1/lyrics', lyricsRouter);
     app.use('/api/v1/rating', ratingRouter);
     app.use('/api/v1/liked-songs', likedSongsRouter);
-    app.use('/health', healthRouter);
-
-    // Import routes
-    const songRequestsRouter = require('./routes/song-requests');
-
-    // Register routes
     app.use('/api/v1/song-requests', songRequestsRouter);
+    app.use('/health', healthRouter);
 
     // Error handling middleware
     app.use((err, req, res, next) => {
