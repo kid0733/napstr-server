@@ -19,6 +19,20 @@ router.post('/', auth, async (req, res) => {
             });
         }
 
+        // Validate URL format and extract type
+        let type;
+        if (spotify_url.includes('/track/') || spotify_url.includes(':track:')) {
+            type = 'track';
+        } else if (spotify_url.includes('/album/') || spotify_url.includes(':album:')) {
+            type = 'album';
+        } else if (spotify_url.includes('/playlist/') || spotify_url.includes(':playlist:')) {
+            type = 'playlist';
+        } else {
+            return res.status(400).json({
+                error: 'Invalid Spotify URL format. Must be a track, album, or playlist URL.'
+            });
+        }
+
         // Check if request already exists
         const existingRequest = await req.app.locals.models.SongRequest.findOne({
             spotify_url,
@@ -39,7 +53,8 @@ router.post('/', auth, async (req, res) => {
         // Create new request
         const songRequest = new req.app.locals.models.SongRequest({
             spotify_url,
-            requested_by: req.user._id
+            type,
+            requested_by: req.user.userId
         });
 
         await songRequest.save();
@@ -57,10 +72,14 @@ router.post('/', auth, async (req, res) => {
         console.error('Create song request error:', error);
         if (error.name === 'ValidationError') {
             return res.status(400).json({
-                error: 'Invalid Spotify URL format'
+                error: 'Invalid request data',
+                details: error.message
             });
         }
-        res.status(500).json({ error: error.message });
+        res.status(500).json({
+            error: 'Failed to create song request',
+            details: process.env.NODE_ENV === 'development' ? error.message : undefined
+        });
     }
 });
 
