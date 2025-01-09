@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const auth = require('../middleware/auth');
+const mongoose = require('mongoose');
 
 // Debug middleware
 router.use((req, res, next) => {
@@ -54,7 +55,7 @@ router.post('/', auth, async (req, res) => {
         const songRequest = new req.app.locals.models.SongRequest({
             spotify_url,
             type,
-            requested_by: req.user.userId
+            requested_by: new mongoose.Types.ObjectId(req.user.userId)
         });
 
         await songRequest.save();
