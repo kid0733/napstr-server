@@ -288,62 +288,32 @@ router.use((err, req, res, next) => {
     next(err);
 });
 
-// Verify token
-router.post('/verify', express.raw({ type: '*/*' }), async (req, res) => {
-    try {
-        const token = req.header('Authorization')?.replace('Bearer ', '');
-        if (!token) {
-            return res.status(401).json({ error: 'No token provided' });
-        }
-
-        // Verify token and get decoded data
-        let decoded;
-        try {
-            decoded = jwt.verify(token, process.env.JWT_SECRET);
-        } catch (error) {
-            console.error('JWT verification error:', error);
-            if (error.name === 'JsonWebTokenError') {
-                return res.status(401).json({ error: 'Invalid token' });
-            }
-            if (error.name === 'TokenExpiredError') {
-                return res.status(401).json({ error: 'Token expired' });
-            }
-            throw error;
-        }
-
-        if (!decoded._id) {
-            return res.status(401).json({ error: 'Invalid token format' });
-        }
-        
-        // Find user with this token
-        const user = await req.app.locals.models.User.findOne({ 
-            _id: decoded._id,
-            'tokens.token': token 
-        }).select('-password -tokens');
-
-        if (!user) {
-            return res.status(401).json({ error: 'Invalid token' });
-        }
-
-        // Update last active timestamp
-        user.lastActive = new Date();
-        await user.save();
-
-        // Return user data
-        res.json({
-            user: {
-                id: user._id,
-                username: user.username,
-                email: user.email,
-                profile: user.profile,
-                preferences: user.preferences
+// Simple verify endpoint
+router.post('/verify', function(req, res) {
+    const token = req.headers['authorization'];
+    if (!token) {
+        return res.status(401).json({
+            error: {
+                msg: 'No token provided!'
             }
         });
-    } catch (error) {
-        console.error('Token verification error:', error);
-        res.status(500).json({ 
-            error: 'Internal Server Error',
-            details: process.env.NODE_ENV === 'development' ? error.message : undefined
+    }
+
+    try {
+        const decoded = jwt.verify(token, process.env.JWT_SECRET);
+        res.json({
+            user: {
+                id: decoded._id,
+                // Only return non-sensitive info
+                username: decoded.username,
+                email: decoded.email
+            }
+        });
+    } catch (err) {
+        return res.status(401).json({
+            error: {
+                msg: 'Failed to verify token!'
+            }
         });
     }
 });
