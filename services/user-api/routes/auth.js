@@ -289,7 +289,7 @@ router.use((err, req, res, next) => {
 });
 
 // Simple verify endpoint
-router.post('/verify', function(req, res) {
+router.post('/verify', express.json(), function(req, res) {
     console.log('Verify endpoint - Request headers:', req.headers);
     const token = req.headers['authorization']?.replace('Bearer ', '');
     if (!token) {
