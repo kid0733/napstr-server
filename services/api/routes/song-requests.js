@@ -55,7 +55,7 @@ router.post('/', auth, async (req, res) => {
         const songRequest = new req.app.locals.models.SongRequest({
             spotify_url,
             type,
-            requested_by: new mongoose.Types.ObjectId(req.user.userId)
+            requested_by: req.user._id
         });
 
         await songRequest.save();
