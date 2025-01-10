@@ -1031,29 +1031,28 @@ router.post('/plays/batch', auth, async (req, res) => {
     let session;
     let retryCount = 0;
     const MAX_RETRIES = 3;
+    const CHUNK_SIZE = 10; // Process in smaller chunks
 
     const handleRequest = async () => {
         try {
-            session = await mongoose.startSession();
-            session.startTransaction();
-
-            console.log('Processing batch play request:', {
-                plays: req.body.plays?.length,
-                userId: req.user._id,
-                attempt: retryCount + 1
-            });
-
             const { plays } = req.body;
             if (!Array.isArray(plays)) {
                 throw new Error('Plays must be an array');
             }
+
+            console.log('Processing batch play request:', {
+                plays: plays.length,
+                userId: req.user._id,
+                attempt: retryCount + 1,
+                chunks: Math.ceil(plays.length / CHUNK_SIZE)
+            });
 
             // Get or create user play history for current month
             const yearMonth = new Date().toISOString().slice(0, 7); // YYYY-MM format
             let userHistory = await req.app.locals.models.UserPlayHistory.findOne({
                 userId: req.user._id,
                 yearMonth
-            }).session(session).lean();
+            }).lean();
 
             if (!userHistory) {
                 console.log('Creating new user history for:', yearMonth);
@@ -1064,135 +1063,149 @@ router.post('/plays/batch', auth, async (req, res) => {
                 };
             }
 
-            // Fetch all songs at once to avoid N+1 queries
-            const trackIds = [...new Set(plays.map(play => play.track_id))];
-            console.log('Fetching songs:', trackIds.length);
-            const songs = await req.app.locals.models.Song
-                .find({ track_id: { $in: trackIds } })
-                .session(session)
-                .lean()
-                .maxTimeMS(5000); // Add timeout for song fetch
+            // Process in chunks
+            const results = {
+                processed: 0,
+                failed: 0,
+                errors: [],
+                ratingUpdates: 0
+            };
 
-            if (!songs || songs.length === 0) {
-                throw new Error('No songs found for the provided track IDs');
-            }
-
-            const songMap = songs.reduce((map, song) => {
-                map[song.track_id] = song;
-                return map;
-            }, {});
-
-            // Prepare bulk operations
-            const ratingHistoryOps = [];
-            const songUpdates = [];
-            const newPlays = [];
-            const errors = [];
-
-            // Process each play
-            console.log('Processing plays...');
-            plays.forEach(play => {
-                const { track_id, duration, completionRate, context } = play;
-                const song = songMap[track_id];
-
-                if (!song) {
-                    errors.push({ track_id, error: 'Song not found' });
-                    return;
-                }
+            // Split plays into chunks
+            for (let i = 0; i < plays.length; i += CHUNK_SIZE) {
+                session = await mongoose.startSession();
+                session.startTransaction();
 
                 try {
-                    const ratingChange = calculateRatingChange(
-                        song.rating,
-                        song.rating_confidence,
-                        'play'
-                    );
+                    const chunk = plays.slice(i, i + CHUNK_SIZE);
+                    console.log(`Processing chunk ${i / CHUNK_SIZE + 1}/${Math.ceil(plays.length / CHUNK_SIZE)}`);
 
-                    // Prepare rating history entry
-                    ratingHistoryOps.push({
-                        track_id: song.track_id,
-                        old_rating: song.rating,
-                        new_rating: song.rating + ratingChange,
-                        event_type: 'play',
-                        rating_change: ratingChange,
-                        confidence: song.rating_confidence
-                    });
+                    // Fetch songs for this chunk
+                    const trackIds = [...new Set(chunk.map(play => play.track_id))];
+                    const songs = await req.app.locals.models.Song
+                        .find({ track_id: { $in: trackIds } })
+                        .session(session)
+                        .lean()
+                        .maxTimeMS(5000);
 
-                    // Prepare song update
-                    songUpdates.push({
-                        updateOne: {
-                            filter: { track_id: song.track_id },
-                            update: {
-                                $inc: {
-                                    total_plays: 1,
-                                    rating: ratingChange,
-                                    rating_confidence: 1
+                    const songMap = songs.reduce((map, song) => {
+                        map[song.track_id] = song;
+                        return map;
+                    }, {});
+
+                    const chunkRatingHistoryOps = [];
+                    const chunkSongUpdates = [];
+                    const chunkNewPlays = [];
+
+                    // Process each play in chunk
+                    chunk.forEach(play => {
+                        const { track_id, duration, completionRate, context } = play;
+                        const song = songMap[track_id];
+
+                        if (!song) {
+                            results.failed++;
+                            results.errors.push({ track_id, error: 'Song not found' });
+                            return;
+                        }
+
+                        try {
+                            const ratingChange = calculateRatingChange(
+                                song.rating,
+                                song.rating_confidence,
+                                'play'
+                            );
+
+                            chunkRatingHistoryOps.push({
+                                track_id: song.track_id,
+                                old_rating: song.rating,
+                                new_rating: song.rating + ratingChange,
+                                event_type: 'play',
+                                rating_change: ratingChange,
+                                confidence: song.rating_confidence
+                            });
+
+                            chunkSongUpdates.push({
+                                updateOne: {
+                                    filter: { track_id: song.track_id },
+                                    update: {
+                                        $inc: {
+                                            total_plays: 1,
+                                            rating: ratingChange,
+                                            rating_confidence: 1
+                                        }
+                                    }
                                 }
-                            }
+                            });
+
+                            chunkNewPlays.push({
+                                songId: track_id,
+                                playedAt: new Date(play.timestamp || Date.now()),
+                                duration: duration || song.duration_ms,
+                                completionRate: completionRate || 100,
+                                skipped: false,
+                                event_type: 'play',
+                                context: context || {}
+                            });
+
+                            results.processed++;
+                        } catch (err) {
+                            results.failed++;
+                            results.errors.push({ track_id, error: err.message });
                         }
                     });
 
-                    // Prepare play history entry
-                    newPlays.push({
-                        songId: track_id,
-                        playedAt: new Date(play.timestamp || Date.now()),
-                        duration: duration || song.duration_ms,
-                        completionRate: completionRate || 100,
-                        skipped: false,
-                        event_type: 'play',
-                        context: context || {}
-                    });
-                } catch (err) {
-                    errors.push({ track_id, error: err.message });
-                }
-            });
+                    if (chunkRatingHistoryOps.length > 0) {
+                        // Execute bulk operations for this chunk
+                        const [ratingHistoryResult] = await Promise.all([
+                            req.app.locals.models.RatingHistory.insertMany(chunkRatingHistoryOps, { 
+                                session,
+                                maxTimeMS: 5000 
+                            }),
+                            req.app.locals.models.Song.bulkWrite(chunkSongUpdates, { 
+                                session,
+                                maxTimeMS: 5000 
+                            })
+                        ]);
 
-            if (errors.length === plays.length) {
+                        results.ratingUpdates += ratingHistoryResult.length;
+
+                        // Update user history for this chunk
+                        await req.app.locals.models.UserPlayHistory.updateOne(
+                            { userId: req.user._id, yearMonth },
+                            { $push: { plays: { $each: chunkNewPlays } } },
+                            { 
+                                upsert: true, 
+                                session,
+                                maxTimeMS: 5000 
+                            }
+                        );
+
+                        await session.commitTransaction();
+                    }
+                } catch (error) {
+                    console.error(`Error processing chunk ${i / CHUNK_SIZE + 1}:`, error);
+                    if (session) {
+                        await session.abortTransaction();
+                    }
+                    throw error;
+                } finally {
+                    if (session) {
+                        session.endSession();
+                    }
+                }
+            }
+
+            if (results.processed === 0) {
                 throw new Error('All plays failed to process');
             }
 
-            // Execute bulk operations with timeouts
-            console.log('Executing bulk operations...');
-            const [ratingHistoryResult] = await Promise.all([
-                req.app.locals.models.RatingHistory.insertMany(ratingHistoryOps, { 
-                    session,
-                    maxTimeMS: 5000 
-                }),
-                req.app.locals.models.Song.bulkWrite(songUpdates, { 
-                    session,
-                    maxTimeMS: 5000 
-                })
-            ]);
-
-            // Update user history
-            userHistory.plays = userHistory.plays.concat(newPlays);
-            await req.app.locals.models.UserPlayHistory.updateOne(
-                { userId: req.user._id, yearMonth },
-                userHistory,
-                { 
-                    upsert: true, 
-                    session,
-                    maxTimeMS: 5000 
-                }
-            );
-
-            console.log('Committing transaction...');
-            await session.commitTransaction();
-
             return {
                 success: true,
-                processed: plays.length - errors.length,
-                failed: errors.length,
-                errors: errors.length > 0 ? errors : undefined,
-                ratingUpdates: ratingHistoryResult.length
+                ...results,
+                errors: results.errors.length > 0 ? results.errors : undefined
             };
         } catch (error) {
-            if (session) {
-                await session.abortTransaction();
-            }
             throw error;
-        } finally {
-            if (session) {
-                session.endSession();
-            }
         }
     };
 
@@ -1228,29 +1241,28 @@ router.post('/skips/batch', auth, async (req, res) => {
     let session;
     let retryCount = 0;
     const MAX_RETRIES = 3;
+    const CHUNK_SIZE = 10; // Process in smaller chunks
 
     const handleRequest = async () => {
         try {
-            session = await mongoose.startSession();
-            session.startTransaction();
-
-            console.log('Processing batch skip request:', {
-                skips: req.body.skips?.length,
-                userId: req.user._id,
-                attempt: retryCount + 1
-            });
-
             const { skips } = req.body;
             if (!Array.isArray(skips)) {
                 throw new Error('Skips must be an array');
             }
+
+            console.log('Processing batch skip request:', {
+                skips: skips.length,
+                userId: req.user._id,
+                attempt: retryCount + 1,
+                chunks: Math.ceil(skips.length / CHUNK_SIZE)
+            });
 
             // Get or create user play history for current month
             const yearMonth = new Date().toISOString().slice(0, 7); // YYYY-MM format
             let userHistory = await req.app.locals.models.UserPlayHistory.findOne({
                 userId: req.user._id,
                 yearMonth
-            }).session(session).lean();
+            }).lean();
 
             if (!userHistory) {
                 console.log('Creating new user history for:', yearMonth);
@@ -1261,132 +1273,150 @@ router.post('/skips/batch', auth, async (req, res) => {
                 };
             }
 
-            // Fetch all songs at once to avoid N+1 queries
-            const trackIds = [...new Set(skips.map(skip => skip.track_id))];
-            console.log('Fetching songs:', trackIds.length);
-            const songs = await req.app.locals.models.Song
-                .find({ track_id: { $in: trackIds } })
-                .session(session)
-                .lean()
-                .maxTimeMS(5000); // Add timeout for song fetch
+            // Process in chunks
+            const results = {
+                processed: 0,
+                failed: 0,
+                errors: [],
+                ratingUpdates: 0
+            };
 
-            if (!songs || songs.length === 0) {
-                throw new Error('No songs found for the provided track IDs');
-            }
-
-            const songMap = songs.reduce((map, song) => {
-                map[song.track_id] = song;
-                return map;
-            }, {});
-
-            // Prepare bulk operations
-            const ratingHistoryOps = [];
-            const songUpdates = [];
-            const newPlays = [];
-            const errors = [];
-
-            // Process each skip
-            console.log('Processing skips...');
-            skips.forEach(skip => {
-                const { track_id, position_ms, context } = skip;
-                const song = songMap[track_id];
-
-                if (!song) {
-                    errors.push({ track_id, error: 'Song not found' });
-                    return;
-                }
+            // Split skips into chunks
+            for (let i = 0; i < skips.length; i += CHUNK_SIZE) {
+                session = await mongoose.startSession();
+                session.startTransaction();
 
                 try {
-                    const ratingChange = calculateRatingChange(
-                        song.rating,
-                        song.rating_confidence,
-                        'skip'
-                    );
+                    const chunk = skips.slice(i, i + CHUNK_SIZE);
+                    console.log(`Processing chunk ${i / CHUNK_SIZE + 1}/${Math.ceil(skips.length / CHUNK_SIZE)}`);
 
-                    // Prepare rating history entry
-                    ratingHistoryOps.push({
-                        track_id: song.track_id,
-                        old_rating: song.rating,
-                        new_rating: song.rating + ratingChange,
-                        event_type: 'skip',
-                        rating_change: ratingChange,
-                        confidence: song.rating_confidence
-                    });
+                    // Fetch songs for this chunk
+                    const trackIds = [...new Set(chunk.map(skip => skip.track_id))];
+                    const songs = await req.app.locals.models.Song
+                        .find({ track_id: { $in: trackIds } })
+                        .session(session)
+                        .lean()
+                        .maxTimeMS(5000);
 
-                    // Prepare song update
-                    songUpdates.push({
-                        updateOne: {
-                            filter: { track_id: song.track_id },
-                            update: {
-                                $inc: {
-                                    skip_count: 1,
-                                    rating: ratingChange,
-                                    rating_confidence: 1
+                    const songMap = songs.reduce((map, song) => {
+                        map[song.track_id] = song;
+                        return map;
+                    }, {});
+
+                    const chunkRatingHistoryOps = [];
+                    const chunkSongUpdates = [];
+                    const chunkNewPlays = [];
+
+                    // Process each skip in chunk
+                    chunk.forEach(skip => {
+                        const { track_id, position_ms, context } = skip;
+                        const song = songMap[track_id];
+
+                        if (!song) {
+                            results.failed++;
+                            results.errors.push({ track_id, error: 'Song not found' });
+                            return;
+                        }
+
+                        try {
+                            const ratingChange = calculateRatingChange(
+                                song.rating,
+                                song.rating_confidence,
+                                'skip'
+                            );
+
+                            chunkRatingHistoryOps.push({
+                                track_id: song.track_id,
+                                old_rating: song.rating,
+                                new_rating: song.rating + ratingChange,
+                                event_type: 'skip',
+                                rating_change: ratingChange,
+                                confidence: song.rating_confidence
+                            });
+
+                            chunkSongUpdates.push({
+                                updateOne: {
+                                    filter: { track_id: song.track_id },
+                                    update: {
+                                        $inc: {
+                                            skip_count: 1,
+                                            rating: ratingChange,
+                                            rating_confidence: 1
+                                        }
+                                    }
                                 }
-                            }
+                            });
+
+                            chunkNewPlays.push({
+                                songId: track_id,
+                                playedAt: new Date(skip.timestamp || Date.now()),
+                                duration: position_ms || 0,
+                                position_ms: position_ms || 0,
+                                completionRate: (position_ms / song.duration_ms) * 100,
+                                skipped: true,
+                                event_type: 'skip',
+                                context: context || {}
+                            });
+
+                            results.processed++;
+                        } catch (err) {
+                            results.failed++;
+                            results.errors.push({ track_id, error: err.message });
                         }
                     });
 
-                    // Prepare skip history entry
-                    newPlays.push({
-                        songId: track_id,
-                        playedAt: new Date(skip.timestamp || Date.now()),
-                        duration: position_ms || 0,
-                        position_ms: position_ms || 0,
-                        completionRate: (position_ms / song.duration_ms) * 100,
-                        skipped: true,
-                        event_type: 'skip',
-                        context: context || {}
-                    });
-                } catch (err) {
-                    errors.push({ track_id, error: err.message });
-                }
-            });
+                    if (chunkRatingHistoryOps.length > 0) {
+                        // Execute bulk operations for this chunk
+                        const [ratingHistoryResult] = await Promise.all([
+                            req.app.locals.models.RatingHistory.insertMany(chunkRatingHistoryOps, { 
+                                session,
+                                maxTimeMS: 5000 
+                            }),
+                            req.app.locals.models.Song.bulkWrite(chunkSongUpdates, { 
+                                session,
+                                maxTimeMS: 5000 
+                            })
+                        ]);
 
-            if (errors.length === skips.length) {
+                        results.ratingUpdates += ratingHistoryResult.length;
+
+                        // Update user history for this chunk
+                        await req.app.locals.models.UserPlayHistory.updateOne(
+                            { userId: req.user._id, yearMonth },
+                            { $push: { plays: { $each: chunkNewPlays } } },
+                            { 
+                                upsert: true, 
+                                session,
+                                maxTimeMS: 5000 
+                            }
+                        );
+
+                        await session.commitTransaction();
+                    }
+                } catch (error) {
+                    console.error(`Error processing chunk ${i / CHUNK_SIZE + 1}:`, error);
+                    if (session) {
+                        await session.abortTransaction();
+                    }
+                    throw error;
+                } finally {
+                    if (session) {
+                        session.endSession();
+                    }
+                }
+            }
+
+            if (results.processed === 0) {
                 throw new Error('All skips failed to process');
             }
 
-            // Execute bulk operations with timeouts
-            console.log('Executing bulk operations...');
-            const [ratingHistoryResult] = await Promise.all([
-                req.app.locals.models.RatingHistory.insertMany(ratingHistoryOps, { 
-                    session,
-                    maxTimeMS: 5000 
-                }),
-                req.app.locals.models.Song.bulkWrite(songUpdates, { 
-                    session,
-                    maxTimeMS: 5000 
-                })
-            ]);
-
-            // Update user history
-            userHistory.plays = userHistory.plays.concat(newPlays);
-            await req.app.locals.models.UserPlayHistory.updateOne(
-                { userId: req.user._id, yearMonth },
-                userHistory,
-                { upsert: true, session, maxTimeMS: 5000 }
-            );
-
-            console.log('Committing transaction...');
-            await session.commitTransaction();
-
             return {
                 success: true,
-                processed: skips.length - errors.length,
-                failed: errors.length,
-                errors: errors.length > 0 ? errors : undefined,
-                ratingUpdates: ratingHistoryResult.length
+                ...results,
+                errors: results.errors.length > 0 ? results.errors : undefined
             };
         } catch (error) {
-            if (session) {
-                await session.abortTransaction();
-            }
             throw error;
-        } finally {
-            if (session) {
-                session.endSession();
-            }
         }
     };
 
