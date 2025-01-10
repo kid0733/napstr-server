@@ -40,12 +40,10 @@ songRequestSchema.path('url').validate(function(url) {
         return url.startsWith('https://open.spotify.com/') || 
                url.startsWith('spotify:');
     } else if (this.source === 'youtube') {
-        return url.startsWith('https://www.youtube.com/watch?v=') ||
-               url.startsWith('https://youtu.be/') ||
-               url.startsWith('https://youtube.com/watch?v=');
+        return url.match(/^https?:\/\/(?:(?:www|m)\.)?(?:youtube\.com\/watch\?v=|youtu\.be\/)[a-zA-Z0-9_-]+/);
     }
     return false;
-}, 'Invalid URL format');
+}, 'Invalid URL format. For YouTube, both www.youtube.com and m.youtube.com URLs are supported.');
 
 // Extract type from URL
 songRequestSchema.pre('save', function(next) {

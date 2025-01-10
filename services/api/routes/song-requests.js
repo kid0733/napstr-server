@@ -41,9 +41,9 @@ router.post('/', auth, async (req, res) => {
                 });
             }
         } else if (source === 'youtube') {
-            if (!url.match(/^https?:\/\/(www\.)?(youtube\.com\/watch\?v=|youtu\.be\/)[a-zA-Z0-9_-]+/)) {
+            if (!url.match(/^https?:\/\/(?:(?:www|m)\.)?(?:youtube\.com\/watch\?v=|youtu\.be\/)[a-zA-Z0-9_-]+/)) {
                 return res.status(400).json({
-                    error: 'Invalid YouTube URL format. Must be a valid YouTube video URL.'
+                    error: 'Invalid YouTube URL format. Must be a valid YouTube video URL. Both www.youtube.com and m.youtube.com URLs are supported.'
                 });
             }
             type = 'track';
