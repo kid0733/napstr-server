@@ -530,12 +530,16 @@ router.post('/:trackId/play', auth, async (req, res) => {
 
 // POST /api/v1/songs/:trackId/skip - Track song skip
 router.post('/:trackId/skip', auth, async (req, res) => {
+    const session = await mongoose.startSession();
+    session.startTransaction();
+
     try {
         const song = await req.app.locals.models.Song.findOne({ 
             track_id: req.params.trackId 
-        });
+        }).session(session);
 
         if (!song) {
+            await session.abortTransaction();
             return res.status(404).json({ error: 'Song not found' });
         }
 
@@ -567,7 +571,7 @@ router.post('/:trackId/skip', auth, async (req, res) => {
         let userHistory = await req.app.locals.models.UserPlayHistory.findOne({
             userId: req.user._id,
             yearMonth
-        });
+        }).session(session);
 
         if (!userHistory) {
             userHistory = new req.app.locals.models.UserPlayHistory({
@@ -587,7 +591,8 @@ router.post('/:trackId/skip', auth, async (req, res) => {
             context: req.body.context || {}
         });
 
-        await userHistory.save();
+        await userHistory.save({ session });
+        await session.commitTransaction();
         
         res.json({ 
             success: true, 
@@ -595,8 +600,11 @@ router.post('/:trackId/skip', auth, async (req, res) => {
             skip_count: song.skip_count 
         });
     } catch (error) {
+        await session.abortTransaction();
         console.error('Track skip error:', error);
         res.status(500).json({ error: error.message });
+    } finally {
+        session.endSession();
     }
 });
 
