@@ -9,6 +9,40 @@ router.use((req, res, next) => {
     next();
 });
 
+// GET /api/v1/songs/recent - Get 20 most recently added songs
+router.get('/recent', async (req, res) => {
+    try {
+        const songs = await req.app.locals.models.Song
+            .find()
+            .select({
+                _id: 0,
+                track_id: 1,
+                title: 1,
+                artists: 1,
+                album: 1,
+                album_art: 1,
+                duration_ms: 1,
+                rating: 1,
+                total_plays: 1,
+                added_at: 1
+            })
+            .sort({ added_at: -1 })
+            .limit(20)
+            .lean();
+
+        res.json({
+            songs,
+            total: songs.length
+        });
+    } catch (error) {
+        console.error('Get recent songs error:', error);
+        res.status(500).json({ 
+            error: 'Failed to fetch recent songs',
+            details: process.env.NODE_ENV === 'development' ? error.message : undefined
+        });
+    }
+});
+
 // GET /api/v1/songs - Get all songs with sorting (alphabetical by default)
 router.get('/', async (req, res) => {
     try {
