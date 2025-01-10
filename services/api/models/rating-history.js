@@ -1,7 +1,7 @@
 const mongoose = require('mongoose');
 
 const ratingHistorySchema = new mongoose.Schema({
-    song_id: { 
+    track_id: { 
         type: String, 
         required: true,
         index: true
@@ -33,6 +33,9 @@ const ratingHistorySchema = new mongoose.Schema({
         updatedAt: 'updated_at'
     }
 });
+
+// Add compound index for better query performance
+ratingHistorySchema.index({ track_id: 1, created_at: -1 });
 
 const RatingHistory = mongoose.model('RatingHistory', ratingHistorySchema);
 module.exports = RatingHistory;

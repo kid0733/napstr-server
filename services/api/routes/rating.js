@@ -5,6 +5,14 @@ const router = express.Router();
 router.get('/history/:trackId', async (req, res) => {
     console.log('Getting rating history for:', req.params.trackId);
     try {
+        const song = await req.app.locals.models.Song
+            .findOne({ track_id: req.params.trackId })
+            .lean();
+
+        if (!song) {
+            return res.status(404).json({ error: 'Song not found' });
+        }
+
         const history = await req.app.locals.models.RatingHistory
             .find({ song_id: req.params.trackId })
             .sort({ created_at: -1 })
