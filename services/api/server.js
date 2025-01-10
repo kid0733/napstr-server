@@ -9,6 +9,8 @@
     const { Album, albumSchema } = require('./models/album');
     const RatingHistory = require('./models/rating-history');
     const { SongRequest, songRequestSchema } = require('./models/song-request');
+    const { PlayHistory, playHistorySchema } = require('./models/play-history');
+    const { PlayStats, playStatsSchema } = require('./models/play-stats');
     const songsRouter = require('./routes/songs');
     const albumsRouter = require('./routes/albums');
     const streamRouter = require('./routes/stream');
@@ -82,7 +84,9 @@
             likedAt: { type: Date, default: Date.now }
         }, { timestamps: true })),
         User: userDb.model('User', userSchema, 'users'),
-        SongRequest: musicDb.model('SongRequest', songRequestSchema)
+        SongRequest: musicDb.model('SongRequest', songRequestSchema),
+        PlayHistory: musicDb.model('PlayHistory', playHistorySchema),
+        PlayStats: musicDb.model('PlayStats', playStatsSchema)
     };
 
     // Log database connections for debugging

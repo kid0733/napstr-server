@@ -2,6 +2,7 @@ const express = require('express');
 const mongoose = require('mongoose');
 const router = express.Router();
 const { calculateRatingChange } = require('../services/rating');
+const { auth } = require('../middleware/auth');
 
 // Debug middleware
 router.use((req, res, next) => {
@@ -448,7 +449,7 @@ router.get('/rating/stats/:trackId', async (req, res) => {
 });
 
 // POST /api/v1/songs/:trackId/play - Track song play
-router.post('/:trackId/play', async (req, res) => {
+router.post('/:trackId/play', auth, async (req, res) => {
     try {
         const song = await req.app.locals.models.Song.findOne({ 
             track_id: req.params.trackId 
@@ -474,11 +475,39 @@ router.post('/:trackId/play', async (req, res) => {
             confidence: song.rating_confidence
         }).save();
 
+        // Update global play stats
         song.total_plays += 1;
         song.rating += ratingChange;
         song.rating_confidence += 1;
         
         await song.save();
+
+        // Get or create user play history for current month
+        const yearMonth = new Date().toISOString().slice(0, 7); // YYYY-MM format
+        let userHistory = await req.app.locals.models.UserPlayHistory.findOne({
+            userId: req.user._id,
+            yearMonth
+        });
+
+        if (!userHistory) {
+            userHistory = new req.app.locals.models.UserPlayHistory({
+                userId: req.user._id,
+                yearMonth,
+                plays: []
+            });
+        }
+
+        // Add play to user history
+        userHistory.plays.push({
+            songId: song.track_id,
+            playedAt: new Date(),
+            duration: req.body.duration || song.duration_ms,
+            completionRate: req.body.completionRate || 100,
+            skipped: false,
+            context: req.body.context || {}
+        });
+
+        await userHistory.save();
         
         res.json({ 
             success: true, 
@@ -492,7 +521,7 @@ router.post('/:trackId/play', async (req, res) => {
 });
 
 // POST /api/v1/songs/:trackId/skip - Track song skip
-router.post('/:trackId/skip', async (req, res) => {
+router.post('/:trackId/skip', auth, async (req, res) => {
     try {
         const song = await req.app.locals.models.Song.findOne({ 
             track_id: req.params.trackId 
@@ -518,11 +547,39 @@ router.post('/:trackId/skip', async (req, res) => {
             confidence: song.rating_confidence
         }).save();
 
+        // Update global skip stats
         song.skip_count += 1;
         song.rating += ratingChange;
         song.rating_confidence += 1;
         
         await song.save();
+
+        // Get or create user play history for current month
+        const yearMonth = new Date().toISOString().slice(0, 7); // YYYY-MM format
+        let userHistory = await req.app.locals.models.UserPlayHistory.findOne({
+            userId: req.user._id,
+            yearMonth
+        });
+
+        if (!userHistory) {
+            userHistory = new req.app.locals.models.UserPlayHistory({
+                userId: req.user._id,
+                yearMonth,
+                plays: []
+            });
+        }
+
+        // Add skip to user history
+        userHistory.plays.push({
+            songId: song.track_id,
+            playedAt: new Date(),
+            duration: req.body.position_ms || 0,
+            completionRate: (req.body.position_ms / song.duration_ms) * 100,
+            skipped: true,
+            context: req.body.context || {}
+        });
+
+        await userHistory.save();
         
         res.json({ 
             success: true, 
@@ -592,6 +649,160 @@ router.get('/:trackId', async (req, res) => {
         res.json(song);
     } catch (error) {
         console.error('Get song error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// GET /api/v1/songs/history - Get user's listening history
+router.get('/history', auth, async (req, res) => {
+    try {
+        const {
+            page = 1,
+            limit = 20,
+            month,  // Optional YYYY-MM format
+            includeSkipped = false
+        } = req.query;
+
+        const skip = (page - 1) * limit;
+        const query = { userId: req.user._id };
+        
+        if (month) {
+            query.yearMonth = month;
+        }
+
+        // Get user history entries
+        const [histories, totalMonths] = await Promise.all([
+            req.app.locals.models.UserPlayHistory
+                .find(query)
+                .sort({ yearMonth: -1 })
+                .lean(),
+            req.app.locals.models.UserPlayHistory
+                .countDocuments({ userId: req.user._id })
+        ]);
+
+        // Flatten and sort all plays
+        let allPlays = histories.reduce((acc, history) => {
+            const plays = includeSkipped 
+                ? history.plays 
+                : history.plays.filter(play => !play.skipped);
+            return [...acc, ...plays];
+        }, []);
+
+        // Sort by playedAt descending
+        allPlays.sort((a, b) => b.playedAt - a.playedAt);
+
+        // Paginate
+        const paginatedPlays = allPlays.slice(skip, skip + limit);
+
+        // Get song details for the paginated plays
+        const songIds = [...new Set(paginatedPlays.map(play => play.songId))];
+        const songs = await req.app.locals.models.Song
+            .find({ track_id: { $in: songIds } })
+            .select('track_id title artists album album_art duration_ms')
+            .lean();
+
+        // Combine play history with song details
+        const enrichedPlays = paginatedPlays.map(play => {
+            const song = songs.find(s => s.track_id === play.songId);
+            return {
+                ...play,
+                song
+            };
+        });
+
+        res.json({
+            history: enrichedPlays,
+            pagination: {
+                current: page,
+                pages: Math.ceil(allPlays.length / limit),
+                total: allPlays.length,
+                totalMonths
+            }
+        });
+    } catch (error) {
+        console.error('Get listening history error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// GET /api/v1/songs/stats - Get user's listening stats
+router.get('/stats', auth, async (req, res) => {
+    try {
+        const { timeframe = 'all' } = req.query; // all, month, week
+        const now = new Date();
+        let startDate;
+
+        switch (timeframe) {
+            case 'week':
+                startDate = new Date(now - 7 * 24 * 60 * 60 * 1000);
+                break;
+            case 'month':
+                startDate = new Date(now.getFullYear(), now.getMonth(), 1);
+                break;
+            default:
+                startDate = new Date(0); // Beginning of time
+        }
+
+        const yearMonth = startDate.toISOString().slice(0, 7);
+        
+        // Get user history entries
+        const histories = await req.app.locals.models.UserPlayHistory
+            .find({
+                userId: req.user._id,
+                yearMonth: { $gte: yearMonth }
+            })
+            .lean();
+
+        // Flatten all plays within the timeframe
+        const plays = histories.reduce((acc, history) => {
+            const validPlays = history.plays.filter(play => 
+                new Date(play.playedAt) >= startDate
+            );
+            return [...acc, ...validPlays];
+        }, []);
+
+        // Calculate stats
+        const totalPlays = plays.length;
+        const completedPlays = plays.filter(play => !play.skipped).length;
+        const skippedPlays = plays.filter(play => play.skipped).length;
+        const totalDuration = plays.reduce((sum, play) => sum + play.duration, 0);
+        const avgCompletionRate = plays.reduce((sum, play) => sum + play.completionRate, 0) / totalPlays || 0;
+
+        // Get most played songs
+        const playCountByTrack = plays.reduce((acc, play) => {
+            acc[play.songId] = (acc[play.songId] || 0) + 1;
+            return acc;
+        }, {});
+
+        const topTrackIds = Object.entries(playCountByTrack)
+            .sort(([,a], [,b]) => b - a)
+            .slice(0, 5)
+            .map(([trackId]) => trackId);
+
+        const topTracks = await req.app.locals.models.Song
+            .find({ track_id: { $in: topTrackIds } })
+            .select('track_id title artists album album_art')
+            .lean();
+
+        // Combine play counts with track details
+        const mostPlayed = topTracks.map(track => ({
+            ...track,
+            playCount: playCountByTrack[track.track_id]
+        })).sort((a, b) => b.playCount - a.playCount);
+
+        res.json({
+            timeframe,
+            stats: {
+                totalPlays,
+                completedPlays,
+                skippedPlays,
+                totalDuration,
+                avgCompletionRate,
+                mostPlayed
+            }
+        });
+    } catch (error) {
+        console.error('Get listening stats error:', error);
         res.status(500).json({ error: error.message });
     }
 });
