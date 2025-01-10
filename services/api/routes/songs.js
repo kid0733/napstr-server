@@ -1032,6 +1032,11 @@ router.post('/plays/batch', auth, async (req, res) => {
     session.startTransaction();
 
     try {
+        console.log('Processing batch play request:', {
+            plays: req.body.plays?.length,
+            userId: req.user._id
+        });
+
         const { plays } = req.body;
         if (!Array.isArray(plays)) {
             await session.abortTransaction();
@@ -1043,24 +1048,44 @@ router.post('/plays/batch', auth, async (req, res) => {
         let userHistory = await req.app.locals.models.UserPlayHistory.findOne({
             userId: req.user._id,
             yearMonth
-        }).session(session);
+        }).session(session).lean();
 
         if (!userHistory) {
-            userHistory = new req.app.locals.models.UserPlayHistory({
+            console.log('Creating new user history for:', yearMonth);
+            userHistory = {
                 userId: req.user._id,
                 yearMonth,
                 plays: []
-            });
+            };
         }
 
-        // Process each play
-        const results = await Promise.all(plays.map(async play => {
-            const { track_id, duration, completionRate, context } = play;
+        // Fetch all songs at once to avoid N+1 queries
+        const trackIds = [...new Set(plays.map(play => play.track_id))];
+        console.log('Fetching songs:', trackIds.length);
+        const songs = await req.app.locals.models.Song
+            .find({ track_id: { $in: trackIds } })
+            .session(session)
+            .lean();
 
-            // Find song
-            const song = await req.app.locals.models.Song.findOne({ track_id }).session(session);
+        const songMap = songs.reduce((map, song) => {
+            map[song.track_id] = song;
+            return map;
+        }, {});
+
+        // Prepare bulk operations
+        const ratingHistoryOps = [];
+        const songUpdates = [];
+        const newPlays = [];
+
+        // Process each play
+        console.log('Processing plays...');
+        plays.forEach(play => {
+            const { track_id, duration, completionRate, context } = play;
+            const song = songMap[track_id];
+
             if (!song) {
-                return { track_id, success: false, error: 'Song not found' };
+                console.log('Song not found:', track_id);
+                return;
             }
 
             const ratingChange = calculateRatingChange(
@@ -1069,24 +1094,32 @@ router.post('/plays/batch', auth, async (req, res) => {
                 'play'
             );
 
-            // Create rating history entry
-            await new req.app.locals.models.RatingHistory({
+            // Prepare rating history entry
+            ratingHistoryOps.push({
                 track_id: song.track_id,
                 old_rating: song.rating,
                 new_rating: song.rating + ratingChange,
                 event_type: 'play',
                 rating_change: ratingChange,
                 confidence: song.rating_confidence
-            }).save({ session });
+            });
 
-            // Update song stats
-            song.total_plays += 1;
-            song.rating += ratingChange;
-            song.rating_confidence += 1;
-            await song.save({ session });
+            // Prepare song update
+            songUpdates.push({
+                updateOne: {
+                    filter: { track_id: song.track_id },
+                    update: {
+                        $inc: {
+                            total_plays: 1,
+                            rating: ratingChange,
+                            rating_confidence: 1
+                        }
+                    }
+                }
+            });
 
-            // Add play to user history
-            userHistory.plays.push({
+            // Prepare play history entry
+            newPlays.push({
                 songId: track_id,
                 playedAt: new Date(play.timestamp || Date.now()),
                 duration: duration || song.duration_ms,
@@ -1095,17 +1128,30 @@ router.post('/plays/batch', auth, async (req, res) => {
                 event_type: 'play',
                 context: context || {}
             });
+        });
 
-            return { track_id, success: true };
-        }));
+        // Execute bulk operations
+        console.log('Executing bulk operations...');
+        const [ratingHistoryResult] = await Promise.all([
+            req.app.locals.models.RatingHistory.insertMany(ratingHistoryOps, { session }),
+            req.app.locals.models.Song.bulkWrite(songUpdates, { session })
+        ]);
 
-        // Save user history
-        await userHistory.save({ session });
+        // Update user history
+        userHistory.plays = userHistory.plays.concat(newPlays);
+        await req.app.locals.models.UserPlayHistory.updateOne(
+            { userId: req.user._id, yearMonth },
+            userHistory,
+            { upsert: true, session }
+        );
+
+        console.log('Committing transaction...');
         await session.commitTransaction();
 
         res.json({
             success: true,
-            results
+            processed: plays.length,
+            ratingUpdates: ratingHistoryResult.length
         });
     } catch (error) {
         await session.abortTransaction();
@@ -1122,6 +1168,11 @@ router.post('/skips/batch', auth, async (req, res) => {
     session.startTransaction();
 
     try {
+        console.log('Processing batch skip request:', {
+            skips: req.body.skips?.length,
+            userId: req.user._id
+        });
+
         const { skips } = req.body;
         if (!Array.isArray(skips)) {
             await session.abortTransaction();
@@ -1133,24 +1184,44 @@ router.post('/skips/batch', auth, async (req, res) => {
         let userHistory = await req.app.locals.models.UserPlayHistory.findOne({
             userId: req.user._id,
             yearMonth
-        }).session(session);
+        }).session(session).lean();
 
         if (!userHistory) {
-            userHistory = new req.app.locals.models.UserPlayHistory({
+            console.log('Creating new user history for:', yearMonth);
+            userHistory = {
                 userId: req.user._id,
                 yearMonth,
                 plays: []
-            });
+            };
         }
 
-        // Process each skip
-        const results = await Promise.all(skips.map(async skip => {
-            const { track_id, position_ms, context } = skip;
+        // Fetch all songs at once to avoid N+1 queries
+        const trackIds = [...new Set(skips.map(skip => skip.track_id))];
+        console.log('Fetching songs:', trackIds.length);
+        const songs = await req.app.locals.models.Song
+            .find({ track_id: { $in: trackIds } })
+            .session(session)
+            .lean();
 
-            // Find song
-            const song = await req.app.locals.models.Song.findOne({ track_id }).session(session);
+        const songMap = songs.reduce((map, song) => {
+            map[song.track_id] = song;
+            return map;
+        }, {});
+
+        // Prepare bulk operations
+        const ratingHistoryOps = [];
+        const songUpdates = [];
+        const newPlays = [];
+
+        // Process each skip
+        console.log('Processing skips...');
+        skips.forEach(skip => {
+            const { track_id, position_ms, context } = skip;
+            const song = songMap[track_id];
+
             if (!song) {
-                return { track_id, success: false, error: 'Song not found' };
+                console.log('Song not found:', track_id);
+                return;
             }
 
             const ratingChange = calculateRatingChange(
@@ -1159,24 +1230,32 @@ router.post('/skips/batch', auth, async (req, res) => {
                 'skip'
             );
 
-            // Create rating history entry
-            await new req.app.locals.models.RatingHistory({
+            // Prepare rating history entry
+            ratingHistoryOps.push({
                 track_id: song.track_id,
                 old_rating: song.rating,
                 new_rating: song.rating + ratingChange,
                 event_type: 'skip',
                 rating_change: ratingChange,
                 confidence: song.rating_confidence
-            }).save({ session });
+            });
 
-            // Update song stats
-            song.skip_count += 1;
-            song.rating += ratingChange;
-            song.rating_confidence += 1;
-            await song.save({ session });
+            // Prepare song update
+            songUpdates.push({
+                updateOne: {
+                    filter: { track_id: song.track_id },
+                    update: {
+                        $inc: {
+                            skip_count: 1,
+                            rating: ratingChange,
+                            rating_confidence: 1
+                        }
+                    }
+                }
+            });
 
-            // Add skip to user history
-            userHistory.plays.push({
+            // Prepare skip history entry
+            newPlays.push({
                 songId: track_id,
                 playedAt: new Date(skip.timestamp || Date.now()),
                 duration: position_ms || 0,
@@ -1186,17 +1265,30 @@ router.post('/skips/batch', auth, async (req, res) => {
                 event_type: 'skip',
                 context: context || {}
             });
+        });
 
-            return { track_id, success: true };
-        }));
+        // Execute bulk operations
+        console.log('Executing bulk operations...');
+        const [ratingHistoryResult] = await Promise.all([
+            req.app.locals.models.RatingHistory.insertMany(ratingHistoryOps, { session }),
+            req.app.locals.models.Song.bulkWrite(songUpdates, { session })
+        ]);
 
-        // Save user history
-        await userHistory.save({ session });
+        // Update user history
+        userHistory.plays = userHistory.plays.concat(newPlays);
+        await req.app.locals.models.UserPlayHistory.updateOne(
+            { userId: req.user._id, yearMonth },
+            userHistory,
+            { upsert: true, session }
+        );
+
+        console.log('Committing transaction...');
         await session.commitTransaction();
 
         res.json({
             success: true,
-            results
+            processed: skips.length,
+            ratingUpdates: ratingHistoryResult.length
         });
     } catch (error) {
         await session.abortTransaction();
