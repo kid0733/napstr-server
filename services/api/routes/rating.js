@@ -14,7 +14,7 @@ router.get('/history/:trackId', async (req, res) => {
         }
 
         const history = await req.app.locals.models.RatingHistory
-            .find({ song_id: req.params.trackId })
+            .find({ track_id: req.params.trackId })
             .sort({ created_at: -1 })
             .limit(50)
             .lean();
@@ -40,7 +40,7 @@ router.get('/stats/:trackId', async (req, res) => {
         }
 
         const history = await req.app.locals.models.RatingHistory
-            .find({ song_id: req.params.trackId })
+            .find({ track_id: req.params.trackId })
             .sort({ created_at: -1 });
 
         const stats = {
