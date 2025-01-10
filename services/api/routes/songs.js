@@ -394,289 +394,6 @@ router.get('/random', async (req, res) => {
     }
 });
 
-// Rating History - separate route
-router.get('/rating/history/:trackId', async (req, res) => {
-    console.log('Getting rating history for:', req.params.trackId);
-    try {
-        const history = await req.app.locals.models.RatingHistory
-            .find({ track_id: req.params.trackId })
-            .sort({ created_at: -1 })
-            .limit(50)
-            .lean();
-
-        console.log('Found history entries:', history.length);
-        res.json(history);
-    } catch (error) {
-        console.error('Get rating history error:', error);
-        res.status(500).json({ error: error.message });
-    }
-});
-
-// Rating Stats - separate route
-router.get('/rating/stats/:trackId', async (req, res) => {
-    console.log('Getting rating stats for:', req.params.trackId);
-    try {
-        const song = await req.app.locals.models.Song
-            .findOne({ track_id: req.params.trackId })
-            .lean();
-
-        if (!song) {
-            return res.status(404).json({ error: 'Song not found' });
-        }
-
-        const history = await req.app.locals.models.RatingHistory
-            .find({ track_id: req.params.trackId })
-            .sort({ created_at: -1 });
-
-        const stats = {
-            current_rating: song.rating,
-            confidence: song.rating_confidence,
-            total_changes: history.length,
-            biggest_gain: history.length > 0 ? Math.max(...history.map(h => h.rating_change)) : 0,
-            biggest_loss: history.length > 0 ? Math.min(...history.map(h => h.rating_change)) : 0,
-            events: {
-                plays: history.filter(h => h.event_type === 'play').length,
-                skips: history.filter(h => h.event_type === 'skip').length,
-                downloads: history.filter(h => h.event_type === 'download').length
-            }
-        };
-
-        res.json(stats);
-    } catch (error) {
-        console.error('Get rating stats error:', error);
-        res.status(500).json({ error: error.message });
-    }
-});
-
-// POST /api/v1/songs/:trackId/play - Track song play
-router.post('/:trackId/play', auth, async (req, res) => {
-    const session = await mongoose.startSession();
-    session.startTransaction();
-
-    try {
-        const song = await req.app.locals.models.Song.findOne({ 
-            track_id: req.params.trackId 
-        }).session(session);
-
-        if (!song) {
-            await session.abortTransaction();
-            return res.status(404).json({ error: 'Song not found' });
-        }
-
-        const ratingChange = calculateRatingChange(
-            song.rating, 
-            song.rating_confidence, 
-            'play'
-        );
-
-        // Create rating history entry
-        await new req.app.locals.models.RatingHistory({
-            track_id: song.track_id,
-            old_rating: song.rating,
-            new_rating: song.rating + ratingChange,
-            event_type: 'play',
-            rating_change: ratingChange,
-            confidence: song.rating_confidence
-        }).save({ session });
-
-        // Update global play stats
-        song.total_plays += 1;
-        song.rating += ratingChange;
-        song.rating_confidence += 1;
-        
-        await song.save({ session });
-
-        // Get or create user play history for current month
-        const yearMonth = new Date().toISOString().slice(0, 7); // YYYY-MM format
-        let userHistory = await req.app.locals.models.UserPlayHistory.findOne({
-            userId: req.user._id,
-            yearMonth
-        }).session(session);
-
-        if (!userHistory) {
-            userHistory = new req.app.locals.models.UserPlayHistory({
-                userId: req.user._id,
-                yearMonth,
-                plays: []
-            });
-        }
-
-        // Add play to user history
-        userHistory.plays.push({
-            songId: song.track_id,
-            playedAt: new Date(),
-            duration: req.body.duration || song.duration_ms,
-            completionRate: req.body.completionRate || 100,
-            skipped: false,
-            context: req.body.context || {}
-        });
-
-        await userHistory.save({ session });
-        await session.commitTransaction();
-        
-        res.json({ 
-            success: true, 
-            rating: song.rating,
-            total_plays: song.total_plays 
-        });
-    } catch (error) {
-        await session.abortTransaction();
-        console.error('Track play error:', error);
-        res.status(500).json({ error: error.message });
-    } finally {
-        session.endSession();
-    }
-});
-
-// POST /api/v1/songs/:trackId/skip - Track song skip
-router.post('/:trackId/skip', auth, async (req, res) => {
-    const session = await mongoose.startSession();
-    session.startTransaction();
-
-    try {
-        const song = await req.app.locals.models.Song.findOne({ 
-            track_id: req.params.trackId 
-        }).session(session);
-
-        if (!song) {
-            await session.abortTransaction();
-            return res.status(404).json({ error: 'Song not found' });
-        }
-
-        const ratingChange = calculateRatingChange(
-            song.rating, 
-            song.rating_confidence, 
-            'skip'
-        );
-
-        // Create rating history entry
-        await new req.app.locals.models.RatingHistory({
-            track_id: song.track_id,
-            old_rating: song.rating,
-            new_rating: song.rating + ratingChange,
-            event_type: 'skip',
-            rating_change: ratingChange,
-            confidence: song.rating_confidence
-        }).save({ session });
-
-        // Update global skip stats
-        song.skip_count += 1;
-        song.rating += ratingChange;
-        song.rating_confidence += 1;
-        
-        await song.save({ session });
-
-        // Get or create user play history for current month
-        const yearMonth = new Date().toISOString().slice(0, 7); // YYYY-MM format
-        let userHistory = await req.app.locals.models.UserPlayHistory.findOne({
-            userId: req.user._id,
-            yearMonth
-        }).session(session);
-
-        if (!userHistory) {
-            userHistory = new req.app.locals.models.UserPlayHistory({
-                userId: req.user._id,
-                yearMonth,
-                plays: []
-            });
-        }
-
-        // Add skip to user history
-        userHistory.plays.push({
-            songId: song.track_id,
-            playedAt: new Date(),
-            duration: req.body.position_ms || 0,
-            completionRate: (req.body.position_ms / song.duration_ms) * 100,
-            skipped: true,
-            context: req.body.context || {}
-        });
-
-        await userHistory.save({ session });
-        await session.commitTransaction();
-        
-        res.json({ 
-            success: true, 
-            rating: song.rating,
-            skip_count: song.skip_count 
-        });
-    } catch (error) {
-        await session.abortTransaction();
-        console.error('Track skip error:', error);
-        res.status(500).json({ error: error.message });
-    } finally {
-        session.endSession();
-    }
-});
-
-// POST /api/v1/songs/:trackId/download - Track song download
-router.post('/:trackId/download', async (req, res) => {
-    const session = await mongoose.startSession();
-    session.startTransaction();
-
-    try {
-        const song = await req.app.locals.models.Song.findOne({ 
-            track_id: req.params.trackId 
-        }).session(session);
-
-        if (!song) {
-            await session.abortTransaction();
-            return res.status(404).json({ error: 'Song not found' });
-        }
-
-        const ratingChange = calculateRatingChange(
-            song.rating, 
-            song.rating_confidence, 
-            'download'
-        );
-
-        // Create rating history entry
-        await new req.app.locals.models.RatingHistory({
-            track_id: song.track_id,
-            old_rating: song.rating,
-            new_rating: song.rating + ratingChange,
-            event_type: 'download',
-            rating_change: ratingChange,
-            confidence: song.rating_confidence
-        }).save({ session });
-
-        song.download_count += 1;
-        song.rating += ratingChange;
-        song.rating_confidence += 1;
-        
-        await song.save({ session });
-        await session.commitTransaction();
-        
-        res.json({ 
-            success: true, 
-            rating: song.rating,
-            download_count: song.download_count 
-        });
-    } catch (error) {
-        await session.abortTransaction();
-        console.error('Track download error:', error);
-        res.status(500).json({ error: error.message });
-    } finally {
-        session.endSession();
-    }
-});
-
-// GET /api/v1/songs/:trackId - Get song details (should be last)
-router.get('/:trackId', async (req, res) => {
-    try {
-        const song = await req.app.locals.models.Song
-            .findOne({ track_id: req.params.trackId })
-            .lean();
-
-        if (!song) {
-            return res.status(404).json({ error: 'Song not found' });
-        }
-        res.json(song);
-    } catch (error) {
-        console.error('Get song error:', error);
-        res.status(500).json({ error: error.message });
-    }
-});
-
 // GET /api/v1/songs/history - Get user's listening history
 router.get('/history', auth, async (req, res) => {
     try {
@@ -827,6 +544,682 @@ router.get('/stats', auth, async (req, res) => {
         });
     } catch (error) {
         console.error('Get listening stats error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Rating History - separate route
+router.get('/rating/history/:trackId', async (req, res) => {
+    console.log('Getting rating history for:', req.params.trackId);
+    try {
+        const history = await req.app.locals.models.RatingHistory
+            .find({ track_id: req.params.trackId })
+            .sort({ created_at: -1 })
+            .limit(50)
+            .lean();
+
+        console.log('Found history entries:', history.length);
+        res.json(history);
+    } catch (error) {
+        console.error('Get rating history error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Rating Stats - separate route
+router.get('/rating/stats/:trackId', async (req, res) => {
+    console.log('Getting rating stats for:', req.params.trackId);
+    try {
+        const song = await req.app.locals.models.Song
+            .findOne({ track_id: req.params.trackId })
+            .lean();
+
+        if (!song) {
+            return res.status(404).json({ error: 'Song not found' });
+        }
+
+        const history = await req.app.locals.models.RatingHistory
+            .find({ track_id: req.params.trackId })
+            .sort({ created_at: -1 });
+
+        const stats = {
+            current_rating: song.rating,
+            confidence: song.rating_confidence,
+            total_changes: history.length,
+            biggest_gain: history.length > 0 ? Math.max(...history.map(h => h.rating_change)) : 0,
+            biggest_loss: history.length > 0 ? Math.min(...history.map(h => h.rating_change)) : 0,
+            events: {
+                plays: history.filter(h => h.event_type === 'play').length,
+                skips: history.filter(h => h.event_type === 'skip').length,
+                downloads: history.filter(h => h.event_type === 'download').length
+            }
+        };
+
+        res.json(stats);
+    } catch (error) {
+        console.error('Get rating stats error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// POST /api/v1/songs/:trackId/play - Track song play
+router.post('/:trackId/play', auth, async (req, res) => {
+    console.log('Starting play tracking for:', req.params.trackId);
+    const session = await mongoose.startSession();
+    session.startTransaction();
+
+    try {
+        console.log('Finding song in database...');
+        const song = await req.app.locals.models.Song.findOne({ 
+            track_id: req.params.trackId 
+        }).session(session);
+
+        if (!song) {
+            console.log('Song not found:', req.params.trackId);
+            await session.abortTransaction();
+            return res.status(404).json({ error: 'Song not found' });
+        }
+        console.log('Found song:', { title: song.title, current_rating: song.rating });
+
+        console.log('Calculating rating change...');
+        const ratingChange = calculateRatingChange(
+            song.rating, 
+            song.rating_confidence, 
+            'play'
+        );
+        console.log('Rating change calculated:', ratingChange);
+
+        // Create rating history entry
+        console.log('Creating rating history entry...');
+        await new req.app.locals.models.RatingHistory({
+            track_id: song.track_id,
+            old_rating: song.rating,
+            new_rating: song.rating + ratingChange,
+            event_type: 'play',
+            rating_change: ratingChange,
+            confidence: song.rating_confidence
+        }).save({ session });
+        console.log('Rating history entry created');
+
+        // Update global play stats
+        console.log('Updating song stats...');
+        song.total_plays += 1;
+        song.rating += ratingChange;
+        song.rating_confidence += 1;
+        
+        await song.save({ session });
+        console.log('Song stats updated');
+
+        // Get or create user play history for current month
+        const yearMonth = new Date().toISOString().slice(0, 7); // YYYY-MM format
+        console.log('Finding user play history for:', yearMonth);
+        let userHistory = await req.app.locals.models.UserPlayHistory.findOne({
+            userId: req.user._id,
+            yearMonth
+        }).session(session);
+
+        if (!userHistory) {
+            console.log('Creating new user play history...');
+            userHistory = new req.app.locals.models.UserPlayHistory({
+                userId: req.user._id,
+                yearMonth,
+                plays: []
+            });
+        }
+
+        // Add play to user history
+        console.log('Adding play to user history...');
+        userHistory.plays.push({
+            songId: song.track_id,
+            playedAt: new Date(),
+            duration: req.body.duration || song.duration_ms,
+            completionRate: req.body.completionRate || 100,
+            skipped: false,
+            context: req.body.context || {}
+        });
+
+        await userHistory.save({ session });
+        console.log('User history saved');
+
+        console.log('Committing transaction...');
+        await session.commitTransaction();
+        console.log('Transaction committed successfully');
+        
+        res.json({ 
+            success: true, 
+            rating: song.rating,
+            total_plays: song.total_plays 
+        });
+    } catch (error) {
+        console.error('Track play error:', error);
+        console.error('Error stack:', error.stack);
+        await session.abortTransaction();
+        console.log('Transaction aborted due to error');
+        res.status(500).json({ error: error.message });
+    } finally {
+        session.endSession();
+        console.log('Session ended');
+    }
+});
+
+// POST /api/v1/songs/:trackId/skip - Track song skip
+router.post('/:trackId/skip', auth, async (req, res) => {
+    const session = await mongoose.startSession();
+    session.startTransaction();
+
+    try {
+        const song = await req.app.locals.models.Song.findOne({ 
+            track_id: req.params.trackId 
+        }).session(session);
+
+        if (!song) {
+            await session.abortTransaction();
+            return res.status(404).json({ error: 'Song not found' });
+        }
+
+        const ratingChange = calculateRatingChange(
+            song.rating, 
+            song.rating_confidence, 
+            'skip'
+        );
+
+        // Create rating history entry
+        await new req.app.locals.models.RatingHistory({
+            track_id: song.track_id,
+            old_rating: song.rating,
+            new_rating: song.rating + ratingChange,
+            event_type: 'skip',
+            rating_change: ratingChange,
+            confidence: song.rating_confidence
+        }).save({ session });
+
+        // Update global skip stats
+        song.skip_count += 1;
+        song.rating += ratingChange;
+        song.rating_confidence += 1;
+        
+        await song.save({ session });
+
+        // Get or create user play history for current month
+        const yearMonth = new Date().toISOString().slice(0, 7); // YYYY-MM format
+        let userHistory = await req.app.locals.models.UserPlayHistory.findOne({
+            userId: req.user._id,
+            yearMonth
+        }).session(session);
+
+        if (!userHistory) {
+            userHistory = new req.app.locals.models.UserPlayHistory({
+                userId: req.user._id,
+                yearMonth,
+                plays: []
+            });
+        }
+
+        // Add skip to user history
+        userHistory.plays.push({
+            songId: song.track_id,
+            playedAt: new Date(),
+            duration: req.body.position_ms || 0,
+            completionRate: (req.body.position_ms / song.duration_ms) * 100,
+            skipped: true,
+            context: req.body.context || {}
+        });
+
+        await userHistory.save({ session });
+        await session.commitTransaction();
+        
+        res.json({ 
+            success: true, 
+            rating: song.rating,
+            skip_count: song.skip_count 
+        });
+    } catch (error) {
+        await session.abortTransaction();
+        console.error('Track skip error:', error);
+        res.status(500).json({ error: error.message });
+    } finally {
+        session.endSession();
+    }
+});
+
+// POST /api/v1/songs/:trackId/download - Track song download
+router.post('/:trackId/download', async (req, res) => {
+    const session = await mongoose.startSession();
+    session.startTransaction();
+
+    try {
+        const song = await req.app.locals.models.Song.findOne({ 
+            track_id: req.params.trackId 
+        }).session(session);
+
+        if (!song) {
+            await session.abortTransaction();
+            return res.status(404).json({ error: 'Song not found' });
+        }
+
+        const ratingChange = calculateRatingChange(
+            song.rating, 
+            song.rating_confidence, 
+            'download'
+        );
+
+        // Create rating history entry
+        await new req.app.locals.models.RatingHistory({
+            track_id: song.track_id,
+            old_rating: song.rating,
+            new_rating: song.rating + ratingChange,
+            event_type: 'download',
+            rating_change: ratingChange,
+            confidence: song.rating_confidence
+        }).save({ session });
+
+        song.download_count += 1;
+        song.rating += ratingChange;
+        song.rating_confidence += 1;
+        
+        await song.save({ session });
+        await session.commitTransaction();
+        
+        res.json({ 
+            success: true, 
+            rating: song.rating,
+            download_count: song.download_count 
+        });
+    } catch (error) {
+        await session.abortTransaction();
+        console.error('Track download error:', error);
+        res.status(500).json({ error: error.message });
+    } finally {
+        session.endSession();
+    }
+});
+
+// POST /api/v1/songs/:trackId/events/resume - Track song resume
+router.post('/:trackId/events/resume', auth, async (req, res) => {
+    try {
+        const song = await req.app.locals.models.Song.findOne({ 
+            track_id: req.params.trackId 
+        });
+
+        if (!song) {
+            return res.status(404).json({ error: 'Song not found' });
+        }
+
+        // Get or create user play history for current month
+        const yearMonth = new Date().toISOString().slice(0, 7); // YYYY-MM format
+        let userHistory = await req.app.locals.models.UserPlayHistory.findOne({
+            userId: req.user._id,
+            yearMonth
+        });
+
+        if (!userHistory) {
+            userHistory = new req.app.locals.models.UserPlayHistory({
+                userId: req.user._id,
+                yearMonth,
+                plays: []
+            });
+        }
+
+        // Add resume event to user history
+        userHistory.plays.push({
+            songId: song.track_id,
+            playedAt: new Date(),
+            duration: 0,
+            position_ms: req.body.position_ms || 0,
+            completionRate: 0,
+            skipped: false,
+            context: req.body.context || {},
+            event_type: 'resume'
+        });
+
+        await userHistory.save();
+        
+        res.json({ success: true });
+    } catch (error) {
+        console.error('Track resume error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// POST /api/v1/songs/:trackId/events/pause - Track song pause
+router.post('/:trackId/events/pause', auth, async (req, res) => {
+    try {
+        const song = await req.app.locals.models.Song.findOne({ 
+            track_id: req.params.trackId 
+        });
+
+        if (!song) {
+            return res.status(404).json({ error: 'Song not found' });
+        }
+
+        // Get or create user play history for current month
+        const yearMonth = new Date().toISOString().slice(0, 7); // YYYY-MM format
+        let userHistory = await req.app.locals.models.UserPlayHistory.findOne({
+            userId: req.user._id,
+            yearMonth
+        });
+
+        if (!userHistory) {
+            userHistory = new req.app.locals.models.UserPlayHistory({
+                userId: req.user._id,
+                yearMonth,
+                plays: []
+            });
+        }
+
+        // Add pause event to user history
+        userHistory.plays.push({
+            songId: song.track_id,
+            playedAt: new Date(),
+            duration: 0,
+            position_ms: req.body.position_ms || 0,
+            completionRate: 0,
+            skipped: false,
+            context: req.body.context || {},
+            event_type: 'pause'
+        });
+
+        await userHistory.save();
+        
+        res.json({ success: true });
+    } catch (error) {
+        console.error('Track pause error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// POST /api/v1/songs/events - Track multiple events in batch (generic endpoint)
+router.post('/events', auth, async (req, res) => {
+    const session = await mongoose.startSession();
+    session.startTransaction();
+
+    try {
+        const { events } = req.body;
+        if (!Array.isArray(events)) {
+            await session.abortTransaction();
+            return res.status(400).json({ error: 'Events must be an array' });
+        }
+
+        // Get or create user play history for current month
+        const yearMonth = new Date().toISOString().slice(0, 7); // YYYY-MM format
+        let userHistory = await req.app.locals.models.UserPlayHistory.findOne({
+            userId: req.user._id,
+            yearMonth
+        }).session(session);
+
+        if (!userHistory) {
+            userHistory = new req.app.locals.models.UserPlayHistory({
+                userId: req.user._id,
+                yearMonth,
+                plays: []
+            });
+        }
+
+        // Process each event
+        const results = await Promise.all(events.map(async event => {
+            const { track_id, event_type, position_ms, duration, completionRate, context } = event;
+
+            // Find song
+            const song = await req.app.locals.models.Song.findOne({ track_id }).session(session);
+            if (!song) {
+                return { track_id, success: false, error: 'Song not found' };
+            }
+
+            // Add event to user history
+            userHistory.plays.push({
+                songId: track_id,
+                playedAt: new Date(event.timestamp || Date.now()),
+                duration: duration || 0,
+                position_ms: position_ms || 0,
+                completionRate: completionRate || 0,
+                skipped: event_type === 'skip',
+                event_type,
+                context: context || {}
+            });
+
+            // Update song stats for play and skip events
+            if (event_type === 'play' || event_type === 'skip') {
+                const ratingChange = calculateRatingChange(
+                    song.rating,
+                    song.rating_confidence,
+                    event_type
+                );
+
+                // Create rating history entry
+                await new req.app.locals.models.RatingHistory({
+                    track_id: song.track_id,
+                    old_rating: song.rating,
+                    new_rating: song.rating + ratingChange,
+                    event_type,
+                    rating_change: ratingChange,
+                    confidence: song.rating_confidence
+                }).save({ session });
+
+                // Update song stats
+                if (event_type === 'play') {
+                    song.total_plays += 1;
+                } else if (event_type === 'skip') {
+                    song.skip_count += 1;
+                }
+                song.rating += ratingChange;
+                song.rating_confidence += 1;
+                await song.save({ session });
+            }
+
+            return { track_id, success: true };
+        }));
+
+        // Save user history
+        await userHistory.save({ session });
+        await session.commitTransaction();
+
+        res.json({
+            success: true,
+            results
+        });
+    } catch (error) {
+        await session.abortTransaction();
+        console.error('Batch track events error:', error);
+        res.status(500).json({ error: error.message });
+    } finally {
+        session.endSession();
+    }
+});
+
+// POST /api/v1/songs/plays/batch - Track multiple plays in batch
+router.post('/plays/batch', auth, async (req, res) => {
+    const session = await mongoose.startSession();
+    session.startTransaction();
+
+    try {
+        const { plays } = req.body;
+        if (!Array.isArray(plays)) {
+            await session.abortTransaction();
+            return res.status(400).json({ error: 'Plays must be an array' });
+        }
+
+        // Get or create user play history for current month
+        const yearMonth = new Date().toISOString().slice(0, 7); // YYYY-MM format
+        let userHistory = await req.app.locals.models.UserPlayHistory.findOne({
+            userId: req.user._id,
+            yearMonth
+        }).session(session);
+
+        if (!userHistory) {
+            userHistory = new req.app.locals.models.UserPlayHistory({
+                userId: req.user._id,
+                yearMonth,
+                plays: []
+            });
+        }
+
+        // Process each play
+        const results = await Promise.all(plays.map(async play => {
+            const { track_id, duration, completionRate, context } = play;
+
+            // Find song
+            const song = await req.app.locals.models.Song.findOne({ track_id }).session(session);
+            if (!song) {
+                return { track_id, success: false, error: 'Song not found' };
+            }
+
+            const ratingChange = calculateRatingChange(
+                song.rating,
+                song.rating_confidence,
+                'play'
+            );
+
+            // Create rating history entry
+            await new req.app.locals.models.RatingHistory({
+                track_id: song.track_id,
+                old_rating: song.rating,
+                new_rating: song.rating + ratingChange,
+                event_type: 'play',
+                rating_change: ratingChange,
+                confidence: song.rating_confidence
+            }).save({ session });
+
+            // Update song stats
+            song.total_plays += 1;
+            song.rating += ratingChange;
+            song.rating_confidence += 1;
+            await song.save({ session });
+
+            // Add play to user history
+            userHistory.plays.push({
+                songId: track_id,
+                playedAt: new Date(play.timestamp || Date.now()),
+                duration: duration || song.duration_ms,
+                completionRate: completionRate || 100,
+                skipped: false,
+                event_type: 'play',
+                context: context || {}
+            });
+
+            return { track_id, success: true };
+        }));
+
+        // Save user history
+        await userHistory.save({ session });
+        await session.commitTransaction();
+
+        res.json({
+            success: true,
+            results
+        });
+    } catch (error) {
+        await session.abortTransaction();
+        console.error('Batch track plays error:', error);
+        res.status(500).json({ error: error.message });
+    } finally {
+        session.endSession();
+    }
+});
+
+// POST /api/v1/songs/skips/batch - Track multiple skips in batch
+router.post('/skips/batch', auth, async (req, res) => {
+    const session = await mongoose.startSession();
+    session.startTransaction();
+
+    try {
+        const { skips } = req.body;
+        if (!Array.isArray(skips)) {
+            await session.abortTransaction();
+            return res.status(400).json({ error: 'Skips must be an array' });
+        }
+
+        // Get or create user play history for current month
+        const yearMonth = new Date().toISOString().slice(0, 7); // YYYY-MM format
+        let userHistory = await req.app.locals.models.UserPlayHistory.findOne({
+            userId: req.user._id,
+            yearMonth
+        }).session(session);
+
+        if (!userHistory) {
+            userHistory = new req.app.locals.models.UserPlayHistory({
+                userId: req.user._id,
+                yearMonth,
+                plays: []
+            });
+        }
+
+        // Process each skip
+        const results = await Promise.all(skips.map(async skip => {
+            const { track_id, position_ms, context } = skip;
+
+            // Find song
+            const song = await req.app.locals.models.Song.findOne({ track_id }).session(session);
+            if (!song) {
+                return { track_id, success: false, error: 'Song not found' };
+            }
+
+            const ratingChange = calculateRatingChange(
+                song.rating,
+                song.rating_confidence,
+                'skip'
+            );
+
+            // Create rating history entry
+            await new req.app.locals.models.RatingHistory({
+                track_id: song.track_id,
+                old_rating: song.rating,
+                new_rating: song.rating + ratingChange,
+                event_type: 'skip',
+                rating_change: ratingChange,
+                confidence: song.rating_confidence
+            }).save({ session });
+
+            // Update song stats
+            song.skip_count += 1;
+            song.rating += ratingChange;
+            song.rating_confidence += 1;
+            await song.save({ session });
+
+            // Add skip to user history
+            userHistory.plays.push({
+                songId: track_id,
+                playedAt: new Date(skip.timestamp || Date.now()),
+                duration: position_ms || 0,
+                position_ms: position_ms || 0,
+                completionRate: (position_ms / song.duration_ms) * 100,
+                skipped: true,
+                event_type: 'skip',
+                context: context || {}
+            });
+
+            return { track_id, success: true };
+        }));
+
+        // Save user history
+        await userHistory.save({ session });
+        await session.commitTransaction();
+
+        res.json({
+            success: true,
+            results
+        });
+    } catch (error) {
+        await session.abortTransaction();
+        console.error('Batch track skips error:', error);
+        res.status(500).json({ error: error.message });
+    } finally {
+        session.endSession();
+    }
+});
+
+// GET /api/v1/songs/:trackId - Get song details (MUST be last)
+router.get('/:trackId', async (req, res) => {
+    try {
+        const song = await req.app.locals.models.Song
+            .findOne({ track_id: req.params.trackId })
+            .lean();
+
+        if (!song) {
+            return res.status(404).json({ error: 'Song not found' });
+        }
+        res.json(song);
+    } catch (error) {
+        console.error('Get song error:', error);
         res.status(500).json({ error: error.message });
     }
 });
