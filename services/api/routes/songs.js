@@ -610,12 +610,16 @@ router.post('/:trackId/skip', auth, async (req, res) => {
 
 // POST /api/v1/songs/:trackId/download - Track song download
 router.post('/:trackId/download', async (req, res) => {
+    const session = await mongoose.startSession();
+    session.startTransaction();
+
     try {
         const song = await req.app.locals.models.Song.findOne({ 
             track_id: req.params.trackId 
-        });
+        }).session(session);
 
         if (!song) {
+            await session.abortTransaction();
             return res.status(404).json({ error: 'Song not found' });
         }
 
@@ -633,13 +637,14 @@ router.post('/:trackId/download', async (req, res) => {
             event_type: 'download',
             rating_change: ratingChange,
             confidence: song.rating_confidence
-        }).save();
+        }).save({ session });
 
         song.download_count += 1;
         song.rating += ratingChange;
         song.rating_confidence += 1;
         
-        await song.save();
+        await song.save({ session });
+        await session.commitTransaction();
         
         res.json({ 
             success: true, 
@@ -647,8 +652,11 @@ router.post('/:trackId/download', async (req, res) => {
             download_count: song.download_count 
         });
     } catch (error) {
+        await session.abortTransaction();
         console.error('Track download error:', error);
         res.status(500).json({ error: error.message });
+    } finally {
+        session.endSession();
     }
 });
 
