@@ -3,6 +3,9 @@ const mongoose = require('mongoose');
 const router = express.Router();
 const { calculateRatingChange } = require('../services/rating');
 const auth = require('../middleware/auth');
+const { Song } = require('../models/song');
+const { RatingHistory } = require('../models/rating-history');
+const { UserPlayHistory } = require('../models/play-history');
 
 // Debug middleware
 router.use((req, res, next) => {
@@ -837,7 +840,7 @@ router.post('/:trackId/download', async (req, res) => {
 // POST /api/v1/songs/:trackId/events/resume - Track song resume
 router.post('/:trackId/events/resume', auth, async (req, res) => {
     try {
-        const song = await req.app.locals.models.Song.findOne({ 
+        const song = await Song.findOne({ 
             track_id: req.params.trackId 
         });
 
@@ -846,14 +849,14 @@ router.post('/:trackId/events/resume', auth, async (req, res) => {
         }
 
         // Get or create user play history for current month
-        const yearMonth = new Date().toISOString().slice(0, 7); // YYYY-MM format
-        let userHistory = await req.app.locals.models.UserPlayHistory.findOne({
+        const yearMonth = new Date().toISOString().slice(0, 7);
+        let userHistory = await UserPlayHistory.findOne({
             userId: req.user._id,
             yearMonth
         });
 
         if (!userHistory) {
-            userHistory = new req.app.locals.models.UserPlayHistory({
+            userHistory = new UserPlayHistory({
                 userId: req.user._id,
                 yearMonth,
                 plays: []
@@ -884,7 +887,7 @@ router.post('/:trackId/events/resume', auth, async (req, res) => {
 // POST /api/v1/songs/:trackId/events/pause - Track song pause
 router.post('/:trackId/events/pause', auth, async (req, res) => {
     try {
-        const song = await req.app.locals.models.Song.findOne({ 
+        const song = await Song.findOne({ 
             track_id: req.params.trackId 
         });
 
@@ -893,14 +896,14 @@ router.post('/:trackId/events/pause', auth, async (req, res) => {
         }
 
         // Get or create user play history for current month
-        const yearMonth = new Date().toISOString().slice(0, 7); // YYYY-MM format
-        let userHistory = await req.app.locals.models.UserPlayHistory.findOne({
+        const yearMonth = new Date().toISOString().slice(0, 7);
+        let userHistory = await UserPlayHistory.findOne({
             userId: req.user._id,
             yearMonth
         });
 
         if (!userHistory) {
-            userHistory = new req.app.locals.models.UserPlayHistory({
+            userHistory = new UserPlayHistory({
                 userId: req.user._id,
                 yearMonth,
                 plays: []
@@ -1031,7 +1034,7 @@ router.post('/plays/batch', auth, async (req, res) => {
     let session;
     let retryCount = 0;
     const MAX_RETRIES = 3;
-    const CHUNK_SIZE = 10; // Process in smaller chunks
+    const CHUNK_SIZE = 10;
 
     const handleRequest = async () => {
         try {
@@ -1048,8 +1051,8 @@ router.post('/plays/batch', auth, async (req, res) => {
             });
 
             // Get or create user play history for current month
-            const yearMonth = new Date().toISOString().slice(0, 7); // YYYY-MM format
-            let userHistory = await req.app.locals.models.UserPlayHistory.findOne({
+            const yearMonth = new Date().toISOString().slice(0, 7);
+            let userHistory = await UserPlayHistory.findOne({
                 userId: req.user._id,
                 yearMonth
             }).lean();
@@ -1082,7 +1085,7 @@ router.post('/plays/batch', auth, async (req, res) => {
 
                     // Fetch songs for this chunk
                     const trackIds = [...new Set(chunk.map(play => play.track_id))];
-                    const songs = await req.app.locals.models.Song
+                    const songs = await Song
                         .find({ track_id: { $in: trackIds } })
                         .session(session)
                         .lean()
@@ -1157,11 +1160,11 @@ router.post('/plays/batch', auth, async (req, res) => {
                     if (chunkRatingHistoryOps.length > 0) {
                         // Execute bulk operations for this chunk
                         const [ratingHistoryResult] = await Promise.all([
-                            req.app.locals.models.RatingHistory.insertMany(chunkRatingHistoryOps, { 
+                            RatingHistory.insertMany(chunkRatingHistoryOps, { 
                                 session,
                                 maxTimeMS: 5000 
                             }),
-                            req.app.locals.models.Song.bulkWrite(chunkSongUpdates, { 
+                            Song.bulkWrite(chunkSongUpdates, { 
                                 session,
                                 maxTimeMS: 5000 
                             })
@@ -1170,7 +1173,7 @@ router.post('/plays/batch', auth, async (req, res) => {
                         results.ratingUpdates += ratingHistoryResult.length;
 
                         // Update user history for this chunk
-                        await req.app.locals.models.UserPlayHistory.updateOne(
+                        await UserPlayHistory.updateOne(
                             { userId: req.user._id, yearMonth },
                             { $push: { plays: { $each: chunkNewPlays } } },
                             { 
@@ -1301,7 +1304,7 @@ router.post('/skips/batch', auth, async (req, res) => {
                     const songMap = songs.reduce((map, song) => {
                         map[song.track_id] = song;
                         return map;
-                    }, {});
+        }, {});
 
                     const chunkRatingHistoryOps = [];
                     const chunkSongUpdates = [];
@@ -1393,7 +1396,7 @@ router.post('/skips/batch', auth, async (req, res) => {
 
                         await session.commitTransaction();
                     }
-                } catch (error) {
+    } catch (error) {
                     console.error(`Error processing chunk ${i / CHUNK_SIZE + 1}:`, error);
                     if (session) {
                         await session.abortTransaction();

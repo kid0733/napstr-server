@@ -2,7 +2,9 @@ const mongoose = require('mongoose');
 
 const songSchema = new mongoose.Schema({
     track_id: { type: String, required: true },
+    source: { type: String, enum: ['spotify', 'youtube'], required: true },
     spotify_id: { type: String },
+    youtube_id: { type: String },
     title: { type: String, required: true },
     artists: [{ type: String }],
     album: { type: String },
@@ -11,6 +13,7 @@ const songSchema = new mongoose.Schema({
     explicit: { type: Boolean },
     isrc: { type: String },
     spotify_url: { type: String },
+    youtube_url: { type: String },
     preview_url: { type: String },
     added_at: { type: Date },
     popularity: { type: Number },
@@ -63,6 +66,8 @@ songSchema.index({ popularity: -1 });
 songSchema.index({ title: 1 });
 songSchema.index({ artists: 1 });
 songSchema.index({ rating: -1 });
+songSchema.index({ source: 1, youtube_id: 1 });
+songSchema.index({ source: 1, spotify_id: 1 });
 
 const Song = mongoose.model('Song', songSchema);
 module.exports = { Song, songSchema };

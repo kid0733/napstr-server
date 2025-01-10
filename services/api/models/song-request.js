@@ -1,7 +1,12 @@
 const mongoose = require('mongoose');
 
 const songRequestSchema = new mongoose.Schema({
-    spotify_url: {
+    source: {
+        type: String,
+        enum: ['spotify', 'youtube'],
+        required: true
+    },
+    url: {
         type: String,
         required: true,
         unique: true
@@ -29,21 +34,33 @@ const songRequestSchema = new mongoose.Schema({
     error: String
 });
 
-// Validate Spotify URL format
-songRequestSchema.path('spotify_url').validate(function(url) {
-    return url.startsWith('https://open.spotify.com/') || 
-           url.startsWith('spotify:');
-}, 'Invalid Spotify URL format');
+// Validate URL format based on source
+songRequestSchema.path('url').validate(function(url) {
+    if (this.source === 'spotify') {
+        return url.startsWith('https://open.spotify.com/') || 
+               url.startsWith('spotify:');
+    } else if (this.source === 'youtube') {
+        return url.startsWith('https://www.youtube.com/watch?v=') ||
+               url.startsWith('https://youtu.be/') ||
+               url.startsWith('https://youtube.com/watch?v=');
+    }
+    return false;
+}, 'Invalid URL format');
 
 // Extract type from URL
 songRequestSchema.pre('save', function(next) {
-    const url = this.spotify_url;
-    if (url.includes('/track/') || url.includes(':track:')) {
+    const url = this.url;
+    if (this.source === 'spotify') {
+        if (url.includes('/track/') || url.includes(':track:')) {
+            this.type = 'track';
+        } else if (url.includes('/album/') || url.includes(':album:')) {
+            this.type = 'album';
+        } else if (url.includes('/playlist/') || url.includes(':playlist:')) {
+            this.type = 'playlist';
+        }
+    } else if (this.source === 'youtube') {
+        // YouTube URLs are always treated as tracks
         this.type = 'track';
-    } else if (url.includes('/album/') || url.includes(':album:')) {
-        this.type = 'album';
-    } else if (url.includes('/playlist/') || url.includes(':playlist:')) {
-        this.type = 'playlist';
     }
     next();
 });

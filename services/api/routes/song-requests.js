@@ -12,31 +12,46 @@ router.use((req, res, next) => {
 // POST /api/v1/song-requests - Create a new song request
 router.post('/', auth, async (req, res) => {
     try {
-        const { spotify_url } = req.body;
+        const { url, source = 'spotify' } = req.body;
 
-        if (!spotify_url) {
+        if (!url) {
             return res.status(400).json({
-                error: 'Spotify URL is required'
+                error: 'URL is required'
+            });
+        }
+
+        if (!['spotify', 'youtube'].includes(source)) {
+            return res.status(400).json({
+                error: 'Invalid source. Must be either "spotify" or "youtube".'
             });
         }
 
         // Validate URL format and extract type
         let type;
-        if (spotify_url.includes('/track/') || spotify_url.includes(':track:')) {
+        if (source === 'spotify') {
+            if (url.includes('/track/') || url.includes(':track:')) {
+                type = 'track';
+            } else if (url.includes('/album/') || url.includes(':album:')) {
+                type = 'album';
+            } else if (url.includes('/playlist/') || url.includes(':playlist:')) {
+                type = 'playlist';
+            } else {
+                return res.status(400).json({
+                    error: 'Invalid Spotify URL format. Must be a track, album, or playlist URL.'
+                });
+            }
+        } else if (source === 'youtube') {
+            if (!url.match(/^https?:\/\/(www\.)?(youtube\.com\/watch\?v=|youtu\.be\/)[a-zA-Z0-9_-]+/)) {
+                return res.status(400).json({
+                    error: 'Invalid YouTube URL format. Must be a valid YouTube video URL.'
+                });
+            }
             type = 'track';
-        } else if (spotify_url.includes('/album/') || spotify_url.includes(':album:')) {
-            type = 'album';
-        } else if (spotify_url.includes('/playlist/') || spotify_url.includes(':playlist:')) {
-            type = 'playlist';
-        } else {
-            return res.status(400).json({
-                error: 'Invalid Spotify URL format. Must be a track, album, or playlist URL.'
-            });
         }
 
         // Check if request already exists
         const existingRequest = await req.app.locals.models.SongRequest.findOne({
-            spotify_url,
+            url,
             status: { $in: ['pending', 'processing'] }
         });
 
@@ -53,7 +68,8 @@ router.post('/', auth, async (req, res) => {
 
         // Create new request
         const songRequest = new req.app.locals.models.SongRequest({
-            spotify_url,
+            url,
+            source,
             type,
             requested_by: req.user._id
         });
@@ -90,6 +106,7 @@ router.get('/', auth, async (req, res) => {
         const {
             status,
             type,
+            source,
             page = 1,
             limit = 20
         } = req.query;
@@ -97,6 +114,7 @@ router.get('/', auth, async (req, res) => {
         const query = { requested_by: req.user._id };
         if (status) query.status = status;
         if (type) query.type = type;
+        if (source) query.source = source;
 
         const requests = await req.app.locals.models.SongRequest
             .find(query)
